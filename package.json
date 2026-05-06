@@ -1,0 +1,34 @@
+{
+  "name": "personal-context-graph",
+  "version": "0.1.0",
+  "description": "An Obsidian plugin that imports ChatGPT exports into a typed personal context graph.",
+  "main": "main.js",
+  "scripts": {
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-md",
+    "chatgpt",
+    "knowledge-graph",
+    "ai-memory"
+  ],
+  "author": "Dhruv",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.5.12",
+    "tslib": "^2.6.3",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  }
+}
