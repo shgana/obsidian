@@ -9,6 +9,7 @@ import {
   createImportPreview,
   runImport
 } from "./importPipeline";
+import { loadCanonicalNodeSeeds } from "./canonicalIndex";
 import { ImportConsentModal, ProgressModal, ZipImportModal } from "./modals";
 import { DEFAULT_SETTINGS, type PersonalContextGraphSettings } from "./settings";
 import { PersonalContextGraphSettingTab } from "./settingsTab";
@@ -113,7 +114,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
 
     try {
       const provider = new OpenAIProvider(this.settings);
-      const artifacts = await runImport(conversations, this.settings, provider, (status) => {
+      const seeds = await loadCanonicalNodeSeeds(this.app.vault, this.settings);
+      const artifacts = await runImport(conversations, this.settings, provider, seeds, (status) => {
         progress.update(`${status.message} (${status.completed}/${status.total})`);
       });
       const writer = new ManagedVaultWriter(this.app.vault, this.settings);
@@ -216,6 +218,26 @@ function migrateSettings(
       settings.confidenceThreshold
     );
   }
+
+  const needsStrictThresholdMigration =
+    value.minimumCanonicalSources === undefined &&
+    settings.singleSourcePromotionThreshold < DEFAULT_SETTINGS.singleSourcePromotionThreshold;
+  if (needsStrictThresholdMigration) {
+    settings.singleSourcePromotionThreshold = DEFAULT_SETTINGS.singleSourcePromotionThreshold;
+  }
+
+  settings.minimumCanonicalSources = Math.max(
+    1,
+    value.minimumCanonicalSources ?? DEFAULT_SETTINGS.minimumCanonicalSources
+  );
+  settings.maxSourceLinksPerType = Math.max(
+    1,
+    value.maxSourceLinksPerType ?? DEFAULT_SETTINGS.maxSourceLinksPerType
+  );
+  settings.maxProjectLinksPerType = Math.max(
+    1,
+    value.maxProjectLinksPerType ?? DEFAULT_SETTINGS.maxProjectLinksPerType
+  );
 
   return settings;
 }

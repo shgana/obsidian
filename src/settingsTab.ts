@@ -149,6 +149,54 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Minimum sources for canonical node")
+      .setDesc("Unmatched concepts below the single-source threshold must appear in this many conversations before promotion.")
+      .addText((text) =>
+        text
+          .setPlaceholder("2")
+          .setValue(String(this.host.settings.minimumCanonicalSources))
+          .onChange(async (value) => {
+            this.host.settings.minimumCanonicalSources = Math.max(
+              1,
+              Number.parseInt(value, 10) || 2
+            );
+            await this.host.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Max source links per type")
+      .setDesc("Caps visible wikilinks from each source note to canonical graph nodes.")
+      .addText((text) =>
+        text
+          .setPlaceholder("3")
+          .setValue(String(this.host.settings.maxSourceLinksPerType))
+          .onChange(async (value) => {
+            this.host.settings.maxSourceLinksPerType = Math.max(
+              1,
+              Number.parseInt(value, 10) || 3
+            );
+            await this.host.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Max project links per type")
+      .setDesc("Caps visible wikilinks from project notes to directly evidenced related context.")
+      .addText((text) =>
+        text
+          .setPlaceholder("3")
+          .setValue(String(this.host.settings.maxProjectLinksPerType))
+          .onChange(async (value) => {
+            this.host.settings.maxProjectLinksPerType = Math.max(
+              1,
+              Number.parseInt(value, 10) || 3
+            );
+            await this.host.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Link Agent Context into graph")
       .setDesc("Off by default so Agent Context does not become a giant hub node.")
       .addToggle((toggle) =>

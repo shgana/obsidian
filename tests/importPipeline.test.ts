@@ -24,6 +24,8 @@ describe("import pipeline", () => {
 
     const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
     expect(sourceDraft?.content).toContain("pcg_managed: true");
+    expect(sourceDraft?.content).toContain("pcg_topics:");
+    expect(sourceDraft?.content).toContain("  - \"topic_obsidian\"");
     expect(sourceDraft?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
 
     const agentDraft = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context.md"));
@@ -59,17 +61,17 @@ const mockProvider: AIProvider = {
       sourceId: conversation.sourceId,
       conversationTitle: conversation.title,
       summary: "The user is designing an Obsidian-based personal context graph.",
-      confidence: 0.93,
+      confidence: 0.95,
       topics: [
         {
           label: "Obsidian",
           summary: "Obsidian is being used as the human-readable graph UI.",
-          confidence: 0.93,
+          confidence: 0.95,
           evidence: [
             {
               quote: "Build this as an Obsidian plugin.",
               turnRole: "user",
-              confidence: 0.93
+              confidence: 0.95
             }
           ]
         }

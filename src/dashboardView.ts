@@ -71,6 +71,21 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Graph edges: ${report.edgeCount}`
   });
   list.createEl("li", {
+    text: `Seeded canonical nodes: ${report.seededNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `New canonical nodes: ${report.newlyPromotedNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Merged candidates: ${report.mergedCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Source-only candidates: ${report.sourceOnlyCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Pruned duplicate nodes: ${report.prunedDuplicateNodeCount ?? 0}`
+  });
+  list.createEl("li", {
     text: `Files created: ${report.createdFiles}`
   });
   list.createEl("li", {

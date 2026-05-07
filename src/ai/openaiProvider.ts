@@ -51,6 +51,7 @@ export class OpenAIProvider implements AIProvider {
         Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
         "Content-Type": "application/json"
       },
+      throw: false,
       body: JSON.stringify({
         model: this.settings.extractionModel,
         input: [
@@ -86,7 +87,7 @@ export class OpenAIProvider implements AIProvider {
 
     const body = response.json as OpenAIResponseBody;
     if (response.status >= 400 || body.error) {
-      throw new Error(body.error?.message || `OpenAI extraction failed (${response.status}).`);
+      throw new Error(formatOpenAiError("extraction", response.status, body));
     }
 
     const outputText = extractOutputText(body);
@@ -109,6 +110,7 @@ export class OpenAIProvider implements AIProvider {
         Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
         "Content-Type": "application/json"
       },
+      throw: false,
       body: JSON.stringify({
         model: this.settings.embeddingModel,
         input: text
@@ -117,7 +119,7 @@ export class OpenAIProvider implements AIProvider {
 
     const body = response.json as OpenAIEmbeddingBody;
     if (response.status >= 400 || body.error) {
-      throw new Error(body.error?.message || `OpenAI embedding failed (${response.status}).`);
+      throw new Error(formatOpenAiError("embedding", response.status, body));
     }
 
     const embedding = body.data?.[0]?.embedding;
@@ -127,6 +129,22 @@ export class OpenAIProvider implements AIProvider {
 
     return embedding;
   }
+}
+
+function formatOpenAiError(
+  phase: "extraction" | "embedding",
+  status: number,
+  body: OpenAIResponseBody | OpenAIEmbeddingBody
+): string {
+  if (status === 401) {
+    return "OpenAI authentication failed (401). Replace the API key in Personal Context Graph settings with a valid Platform API key, then try again.";
+  }
+
+  if (status === 403) {
+    return "OpenAI authorization failed (403). Check that this API key/project has permission to use the configured model.";
+  }
+
+  return body.error?.message || `OpenAI ${phase} failed (${status}).`;
 }
 
 const EXTRACTION_SYSTEM_PROMPT = [

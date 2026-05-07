@@ -56,9 +56,9 @@ export function buildAgentContextPath(
 function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGraph): string {
   const linksByType = graph.sourceLinksById[input.conversation.sourceId] || {};
   const typedFrontmatter = Object.fromEntries(
-    CONTEXT_NODE_TYPES.map((type) => [
-      frontmatterKeyForType(type),
-      (linksByType[type] || []).map((node) => wikiLink(node.path, node.label))
+    CONTEXT_NODE_TYPES.flatMap((type) => [
+      [frontmatterKeyForType(type), (linksByType[type] || []).map((node) => node.id)],
+      [`${frontmatterKeyForType(type)}_paths`, (linksByType[type] || []).map((node) => node.path)]
     ])
   );
 
@@ -95,7 +95,7 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
 
 function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
   const sourceLinks = node.evidence.map((evidence) =>
-    wikiLink(evidence.sourcePath, evidence.sourceTitle)
+    evidence.sourcePath
   );
   const relatedLinks = graph.nodeLinksById[node.id] || {};
 
@@ -108,7 +108,9 @@ function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
       pcg_confidence: round(node.confidence),
       pcg_last_seen: node.lastSeen,
       pcg_evidence_count: node.evidence.length,
-      pcg_sources: uniqueStrings(sourceLinks)
+      pcg_aliases: node.aliases,
+      pcg_source_ids: node.sourceIds,
+      pcg_source_paths: uniqueStrings(sourceLinks)
     }),
     `# ${CONTEXT_NODE_LABEL[node.type]}: ${node.label}`,
     "",
@@ -269,7 +271,12 @@ function renderSourceOnlyContext(
   const lines: string[] = [];
 
   for (const type of CONTEXT_NODE_TYPES) {
-    const promotedSlugs = new Set((linksByType[type] || []).map((node) => node.slug));
+    const promotedSlugs = new Set(
+      (linksByType[type] || []).flatMap((node) => [
+        node.slug,
+        ...node.aliases.map((alias) => slugify(alias))
+      ])
+    );
     const items = input.extraction[EXTRACTION_ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
     const sourceOnlyItems = items
       .filter((item) => !promotedSlugs.has(slugify(item.label.replace(/\s+\(chunk\s+\d+\)$/i, ""))))
@@ -303,7 +310,7 @@ function renderEvidenceList(evidence: NodeEvidence[]): string {
   return evidence
     .map(
       (entry) =>
-        `- ${wikiLink(entry.sourcePath, entry.sourceTitle)} (${round(entry.confidence)}): "${truncate(
+        `- ${entry.sourceTitle} (${entry.sourcePath}) (${round(entry.confidence)}): "${truncate(
           entry.quote,
           240
         )}"`
@@ -355,6 +362,10 @@ function wikiLink(path: string, label: string): string {
 }
 
 function frontmatterKeyForType(type: ContextNodeType): string {
+  if (type === "entity") {
+    return "pcg_entities";
+  }
+
   if (type === "style_pattern") {
     return "pcg_style_patterns";
   }

@@ -12,6 +12,9 @@ export interface PersonalContextGraphSettings {
   confidenceThreshold: number;
   singleSourcePromotionThreshold: number;
   semanticMergeThreshold: number;
+  minimumCanonicalSources: number;
+  maxSourceLinksPerType: number;
+  maxProjectLinksPerType: number;
   maxPromptChars: number;
   linkAgentContextToGraph: boolean;
   pruneStaleManagedFiles: boolean;
@@ -28,8 +31,11 @@ export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   costCapUsd: 5,
   overwritePolicy: "managed-only",
   confidenceThreshold: 0.78,
-  singleSourcePromotionThreshold: 0.88,
+  singleSourcePromotionThreshold: 0.94,
   semanticMergeThreshold: 0.92,
+  minimumCanonicalSources: 2,
+  maxSourceLinksPerType: 3,
+  maxProjectLinksPerType: 3,
   maxPromptChars: 36000,
   linkAgentContextToGraph: false,
   pruneStaleManagedFiles: true,

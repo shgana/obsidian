@@ -112,6 +112,7 @@ export interface GraphNode {
   type: ContextNodeType;
   label: string;
   slug: string;
+  aliases: string[];
   path: string;
   summary: string;
   confidence: number;
@@ -147,6 +148,29 @@ export interface BuiltContextGraph {
   sourceLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   nodeLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   warnings: string[];
+  stats: GraphBuildStats;
+}
+
+export interface GraphBuildStats {
+  seededNodes: number;
+  mergedCandidates: number;
+  newlyPromotedNodes: number;
+  sourceOnlyCandidates: number;
+  prunedDuplicateNodes: number;
+}
+
+export interface CanonicalNodeSeed {
+  type: ContextNodeType;
+  id: string;
+  label: string;
+  slug: string;
+  aliases: string[];
+  path: string;
+  summary: string;
+  confidence: number;
+  evidence: NodeEvidence[];
+  sourceIds: string[];
+  lastSeen?: string;
 }
 
 export interface ImportPreview {
@@ -168,6 +192,11 @@ export interface GraphBuildReport {
   skippedFiles: number;
   nodeCountByType: Record<ContextNodeType, number>;
   edgeCount: number;
+  seededNodeCount: number;
+  mergedCandidateCount: number;
+  newlyPromotedNodeCount: number;
+  sourceOnlyCandidateCount: number;
+  prunedDuplicateNodeCount: number;
   agentContextPath: string;
   startedAt: string;
   completedAt: string;

@@ -4,9 +4,11 @@ import {
   CONTEXT_NODE_TYPES,
   type AIProvider,
   type BuiltContextGraph,
+  type CanonicalNodeSeed,
   type ContextNodeType,
   type ConversationExtraction,
   type ExtractedContextItem,
+  type GraphBuildStats,
   type GraphEdge,
   type GraphNode,
   type NodeEvidence
@@ -24,78 +26,6 @@ const ITEMS_BY_TYPE: Record<ContextNodeType, keyof ConversationExtraction["extra
   style_pattern: "stylePatterns"
 };
 
-export async function buildContextGraph(
-  inputs: ConversationExtraction[],
-  settings: PersonalContextGraphSettings,
-  provider: AIProvider
-): Promise<BuiltContextGraph> {
-  const graph: BuiltContextGraph = {
-    nodes: [],
-    edges: [],
-    sourcePathsById: {},
-    sourceLinksById: {},
-    nodeLinksById: {},
-    warnings: []
-  };
-
-  const nodesByExactKey = new Map<string, GraphNode>();
-
-  for (const input of inputs) {
-    const sourcePath = buildSourcePath(input.conversation.title, input.conversation.sourceId, settings);
-    graph.sourcePathsById[input.conversation.sourceId] = sourcePath;
-    graph.sourceLinksById[input.conversation.sourceId] = {};
-
-    for (const type of CONTEXT_NODE_TYPES) {
-      const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
-      const acceptedItems = prioritizeItems(type, items)
-        .map((item) => normalizeItemForGraph(item, input))
-        .filter(
-          (item) =>
-            item.confidence >= settings.confidenceThreshold &&
-            item.confidence >= settings.singleSourcePromotionThreshold &&
-            item.evidence.length > 0
-        );
-
-      for (const item of acceptedItems) {
-        const node = await findOrCreateNode({
-          item,
-          type,
-          sourcePath,
-          input,
-          nodesByExactKey,
-          graph,
-          settings,
-          provider
-        });
-
-        const linksForType = graph.sourceLinksById[input.conversation.sourceId][type] || [];
-        linksForType.push(node);
-        graph.sourceLinksById[input.conversation.sourceId][type] = uniqueBy(
-          linksForType,
-          (linkedNode) => linkedNode.id
-        );
-
-        const edge = buildEdge(input.conversation.sourceId, node);
-        const existingEdge = graph.edges.find((candidate) => candidate.id === edge.id);
-        if (!existingEdge) {
-          graph.edges.push(edge);
-        } else {
-          existingEdge.confidence = Math.max(existingEdge.confidence, edge.confidence);
-          existingEdge.evidence = uniqueBy(
-            [...existingEdge.evidence, ...edge.evidence],
-            (evidence) => `${evidence.sourceId}:${evidence.quote}`
-          ).slice(0, 12);
-        }
-      }
-    }
-  }
-
-  addTypedNodeLinks(graph);
-  graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
-  graph.edges.sort((left, right) => left.id.localeCompare(right.id));
-  return graph;
-}
-
 const GRAPH_ITEM_LIMITS: Record<ContextNodeType, number> = {
   topic: 10,
   entity: 8,
@@ -107,10 +37,203 @@ const GRAPH_ITEM_LIMITS: Record<ContextNodeType, number> = {
   style_pattern: 5
 };
 
-function prioritizeItems(
-  type: ContextNodeType,
-  items: ExtractedContextItem[]
-): ExtractedContextItem[] {
+const PROJECT_LINK_TYPES: ContextNodeType[] = [
+  "topic",
+  "preference",
+  "decision",
+  "task",
+  "artifact",
+  "entity",
+  "style_pattern"
+];
+
+interface Candidate {
+  type: ContextNodeType;
+  item: ExtractedContextItem;
+  input: ConversationExtraction;
+  sourcePath: string;
+  sourceId: string;
+  embedding?: number[];
+}
+
+interface CandidateCluster {
+  type: ContextNodeType;
+  candidates: Candidate[];
+  label: string;
+  summary: string;
+  embedding?: number[];
+}
+
+export async function buildContextGraph(
+  inputs: ConversationExtraction[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider,
+  seeds: CanonicalNodeSeed[] = []
+): Promise<BuiltContextGraph> {
+  const graph: BuiltContextGraph = {
+    nodes: [],
+    edges: [],
+    sourcePathsById: {},
+    sourceLinksById: {},
+    nodeLinksById: {},
+    warnings: [],
+    stats: createStats()
+  };
+
+  const nodeIndex = new Map<string, GraphNode>();
+  await seedCanonicalNodes(graph, nodeIndex, seeds, settings, provider);
+
+  const unmatchedCandidates: Candidate[] = [];
+  for (const input of inputs) {
+    const sourcePath = buildSourcePath(input.conversation.title, input.conversation.sourceId, settings);
+    graph.sourcePathsById[input.conversation.sourceId] = sourcePath;
+    graph.sourceLinksById[input.conversation.sourceId] = {};
+
+    for (const type of CONTEXT_NODE_TYPES) {
+      const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
+      const candidates = prioritizeItems(type, items)
+        .map((item) => normalizeItemForGraph(item, input))
+        .filter((item) => item.confidence >= settings.confidenceThreshold && item.evidence.length > 0)
+        .map<Candidate>((item) => ({
+          type,
+          item,
+          input,
+          sourcePath,
+          sourceId: input.conversation.sourceId
+        }));
+
+      for (const candidate of candidates) {
+        const existingNode = await findNodeMatch(candidate, graph, nodeIndex, settings, provider);
+        if (existingNode) {
+          mergeCandidateIntoNode(existingNode, candidate);
+          indexNode(existingNode, nodeIndex);
+          addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
+          graph.stats.mergedCandidates += 1;
+        } else {
+          unmatchedCandidates.push(candidate);
+        }
+      }
+    }
+  }
+
+  const clusters = await clusterUnmatchedCandidates(
+    unmatchedCandidates,
+    settings,
+    provider,
+    graph.warnings
+  );
+
+  for (const cluster of clusters) {
+    if (shouldPromoteCluster(cluster, settings)) {
+      const representative = chooseRepresentative(cluster.candidates);
+      const node = createNode(
+        cluster.type,
+        representative.item,
+        settings.outputFolder,
+        slugify(representative.item.label)
+      );
+
+      graph.nodes.push(node);
+      graph.stats.newlyPromotedNodes += 1;
+      for (const candidate of cluster.candidates) {
+        mergeCandidateIntoNode(node, candidate);
+        addSourceLink(graph, candidate.sourceId, candidate.type, node);
+      }
+      graph.stats.mergedCandidates += Math.max(0, cluster.candidates.length - 1);
+      indexNode(node, nodeIndex);
+    } else {
+      graph.stats.sourceOnlyCandidates += cluster.candidates.length;
+    }
+  }
+
+  graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
+  rebuildEvidenceEdges(graph);
+  addSparseProjectLinks(graph, settings);
+  graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
+  graph.edges.sort((left, right) => left.id.localeCompare(right.id));
+  return graph;
+}
+
+function createStats(): GraphBuildStats {
+  return {
+    seededNodes: 0,
+    mergedCandidates: 0,
+    newlyPromotedNodes: 0,
+    sourceOnlyCandidates: 0,
+    prunedDuplicateNodes: 0
+  };
+}
+
+async function seedCanonicalNodes(
+  graph: BuiltContextGraph,
+  nodeIndex: Map<string, GraphNode>,
+  seeds: CanonicalNodeSeed[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  const orderedSeeds = [...seeds].sort(compareSeedSurvivorPriority);
+  for (const seed of orderedSeeds) {
+    const node = seedToNode(seed);
+    const duplicate = await findNodeMatchForLabel(
+      seed.type,
+      seed.label,
+      seed.summary,
+      seed.aliases,
+      graph,
+      nodeIndex,
+      settings,
+      provider
+    );
+
+    if (duplicate) {
+      mergeSeedIntoNode(duplicate, seed);
+      indexNode(duplicate, nodeIndex);
+      graph.stats.prunedDuplicateNodes += 1;
+      continue;
+    }
+
+    graph.nodes.push(node);
+    indexNode(node, nodeIndex);
+    graph.stats.seededNodes += 1;
+  }
+}
+
+function seedToNode(seed: CanonicalNodeSeed): GraphNode {
+  return {
+    id: seed.id,
+    type: seed.type,
+    label: seed.label,
+    slug: seed.slug || slugify(seed.label),
+    aliases: uniqueStrings(seed.aliases || []),
+    path: seed.path,
+    summary: seed.summary,
+    confidence: seed.confidence,
+    evidence: [...seed.evidence],
+    sourceIds: uniqueStrings(seed.sourceIds || []),
+    lastSeen: seed.lastSeen
+  };
+}
+
+function compareSeedSurvivorPriority(left: CanonicalNodeSeed, right: CanonicalNodeSeed): number {
+  const evidenceDelta = right.evidence.length - left.evidence.length;
+  if (evidenceDelta !== 0) {
+    return evidenceDelta;
+  }
+
+  const sourceDelta = right.sourceIds.length - left.sourceIds.length;
+  if (sourceDelta !== 0) {
+    return sourceDelta;
+  }
+
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  return labelNoiseScore(left.label) - labelNoiseScore(right.label);
+}
+
+function prioritizeItems(type: ContextNodeType, items: ExtractedContextItem[]): ExtractedContextItem[] {
   return [...items]
     .sort((left, right) => {
       const confidenceDelta = right.confidence - left.confidence;
@@ -127,10 +250,9 @@ function normalizeItemForGraph(
   item: ExtractedContextItem,
   input: ConversationExtraction
 ): ExtractedContextItem {
-  const label = normalizeLabel(item.label, input.conversation.title);
   return {
     ...item,
-    label
+    label: normalizeLabel(item.label, input.conversation.title)
   };
 }
 
@@ -142,67 +264,83 @@ function normalizeLabel(label: string, conversationTitle: string): string {
     .replace(/\s+/g, " ")
     .trim();
 
-  if (!cleaned) {
-    return cleanConversationTitle;
-  }
-
-  return cleaned;
+  return cleaned || cleanConversationTitle;
 }
 
-interface FindOrCreateNodeArgs {
-  item: ExtractedContextItem;
-  type: ContextNodeType;
-  sourcePath: string;
-  input: ConversationExtraction;
-  nodesByExactKey: Map<string, GraphNode>;
-  graph: BuiltContextGraph;
-  settings: PersonalContextGraphSettings;
-  provider: AIProvider;
-}
-
-async function findOrCreateNode(args: FindOrCreateNodeArgs): Promise<GraphNode> {
-  const slug = slugify(args.item.label);
-  const exactKey = `${args.type}:${slug}`;
-  const exactNode = args.nodesByExactKey.get(exactKey);
-  const semanticNode = exactNode
-    ? undefined
-    : await findSemanticMergeCandidate(args.item, args.type, args.graph, args.settings, args.provider);
-  const node =
-    exactNode ||
-    semanticNode ||
-    createNode(args.type, args.item, args.settings.outputFolder, slug);
-
-  if (!exactNode && !semanticNode) {
-    args.graph.nodes.push(node);
-    args.nodesByExactKey.set(exactKey, node);
-  }
-
-  mergeNodeEvidence(node, args.item, args.input, args.sourcePath);
-  if (!args.nodesByExactKey.has(exactKey)) {
-    args.nodesByExactKey.set(exactKey, node);
-  }
-
-  return node;
-}
-
-async function findSemanticMergeCandidate(
-  item: ExtractedContextItem,
-  type: ContextNodeType,
+async function findNodeMatch(
+  candidate: Candidate,
   graph: BuiltContextGraph,
+  nodeIndex: Map<string, GraphNode>,
   settings: PersonalContextGraphSettings,
   provider: AIProvider
 ): Promise<GraphNode | undefined> {
-  const candidates = graph.nodes.filter((node) => node.type === type);
+  return findNodeMatchForLabel(
+    candidate.type,
+    candidate.item.label,
+    candidate.item.summary,
+    [],
+    graph,
+    nodeIndex,
+    settings,
+    provider,
+    candidate
+  );
+}
+
+async function findNodeMatchForLabel(
+  type: ContextNodeType,
+  label: string,
+  summary: string,
+  aliases: string[],
+  graph: BuiltContextGraph,
+  nodeIndex: Map<string, GraphNode>,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider,
+  candidate?: Candidate
+): Promise<GraphNode | undefined> {
+  for (const key of matchKeys(type, label, aliases)) {
+    const exactNode = nodeIndex.get(key);
+    if (exactNode) {
+      return exactNode;
+    }
+  }
+
+  return findSemanticMergeCandidate({
+    type,
+    label,
+    summary,
+    graph,
+    settings,
+    provider,
+    candidate
+  });
+}
+
+async function findSemanticMergeCandidate(args: {
+  type: ContextNodeType;
+  label: string;
+  summary: string;
+  graph: BuiltContextGraph;
+  settings: PersonalContextGraphSettings;
+  provider: AIProvider;
+  candidate?: Candidate;
+}): Promise<GraphNode | undefined> {
+  const candidates = args.graph.nodes.filter((node) => node.type === args.type);
   if (candidates.length === 0) {
     return undefined;
   }
 
   let itemEmbedding: number[];
   try {
-    itemEmbedding = await provider.embedText(`${item.label}\n${item.summary}`);
+    itemEmbedding =
+      args.candidate?.embedding ||
+      (await args.provider.embedText(`${args.label}\n${args.summary}`));
+    if (args.candidate) {
+      args.candidate.embedding = itemEmbedding;
+    }
   } catch (error) {
-    graph.warnings.push(
-      `Semantic merge skipped for "${item.label}": ${
+    args.graph.warnings.push(
+      `Semantic merge skipped for "${args.label}": ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -211,11 +349,10 @@ async function findSemanticMergeCandidate(
 
   let bestNode: GraphNode | undefined;
   let bestSimilarity = 0;
-
   for (const candidate of candidates) {
     if (!candidate.embedding) {
       try {
-        candidate.embedding = await provider.embedText(`${candidate.label}\n${candidate.summary}`);
+        candidate.embedding = await args.provider.embedText(`${candidate.label}\n${candidate.summary}`);
       } catch {
         continue;
       }
@@ -228,11 +365,133 @@ async function findSemanticMergeCandidate(
     }
   }
 
-  if (bestNode && bestSimilarity >= settings.semanticMergeThreshold) {
+  if (
+    bestNode &&
+    bestSimilarity >= args.settings.semanticMergeThreshold &&
+    passesSemanticGuard(args.label, bestNode.label, bestSimilarity, args.settings)
+  ) {
     return bestNode;
   }
 
   return undefined;
+}
+
+async function clusterUnmatchedCandidates(
+  candidates: Candidate[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider,
+  warnings: string[]
+): Promise<CandidateCluster[]> {
+  const clusters: CandidateCluster[] = [];
+  for (const candidate of candidates) {
+    const cluster = await findClusterMatch(candidate, clusters, settings, provider, warnings);
+    if (cluster) {
+      cluster.candidates.push(candidate);
+      const representative = chooseRepresentative(cluster.candidates);
+      cluster.label = representative.item.label;
+      cluster.summary = representative.item.summary;
+      continue;
+    }
+
+    clusters.push({
+      type: candidate.type,
+      candidates: [candidate],
+      label: candidate.item.label,
+      summary: candidate.item.summary,
+      embedding: candidate.embedding
+    });
+  }
+
+  return clusters;
+}
+
+async function findClusterMatch(
+  candidate: Candidate,
+  clusters: CandidateCluster[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider,
+  warnings: string[]
+): Promise<CandidateCluster | undefined> {
+  const exactSlug = slugify(candidate.item.label);
+  const exactCluster = clusters.find(
+    (cluster) => cluster.type === candidate.type && slugify(cluster.label) === exactSlug
+  );
+  if (exactCluster) {
+    return exactCluster;
+  }
+
+  let candidateEmbedding: number[] | undefined = candidate.embedding;
+  try {
+    candidateEmbedding =
+      candidateEmbedding || (await provider.embedText(`${candidate.item.label}\n${candidate.item.summary}`));
+    candidate.embedding = candidateEmbedding;
+  } catch (error) {
+    warnings.push(
+      `Semantic cluster skipped for "${candidate.item.label}": ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return undefined;
+  }
+
+  let bestCluster: CandidateCluster | undefined;
+  let bestSimilarity = 0;
+  for (const cluster of clusters.filter((entry) => entry.type === candidate.type)) {
+    if (!cluster.embedding) {
+      try {
+        cluster.embedding = await provider.embedText(`${cluster.label}\n${cluster.summary}`);
+      } catch {
+        continue;
+      }
+    }
+
+    const similarity = cosineSimilarity(candidateEmbedding, cluster.embedding);
+    if (similarity > bestSimilarity) {
+      bestSimilarity = similarity;
+      bestCluster = cluster;
+    }
+  }
+
+  if (
+    bestCluster &&
+    bestSimilarity >= settings.semanticMergeThreshold &&
+    passesSemanticGuard(candidate.item.label, bestCluster.label, bestSimilarity, settings)
+  ) {
+    return bestCluster;
+  }
+
+  return undefined;
+}
+
+function shouldPromoteCluster(
+  cluster: CandidateCluster,
+  settings: PersonalContextGraphSettings
+): boolean {
+  const sourceCount = uniqueStrings(cluster.candidates.map((candidate) => candidate.sourceId)).length;
+  const maxConfidence = Math.max(
+    ...cluster.candidates.map((candidate) => candidate.item.confidence)
+  );
+
+  return (
+    sourceCount >= settings.minimumCanonicalSources ||
+    maxConfidence >= settings.singleSourcePromotionThreshold
+  );
+}
+
+function chooseRepresentative(candidates: Candidate[]): Candidate {
+  return [...candidates].sort((left, right) => {
+    const confidenceDelta = right.item.confidence - left.item.confidence;
+    if (confidenceDelta !== 0) {
+      return confidenceDelta;
+    }
+
+    const evidenceDelta = right.item.evidence.length - left.item.evidence.length;
+    if (evidenceDelta !== 0) {
+      return evidenceDelta;
+    }
+
+    return labelNoiseScore(left.item.label) - labelNoiseScore(right.item.label);
+  })[0];
 }
 
 function createNode(
@@ -247,6 +506,7 @@ function createNode(
     type,
     label: item.label,
     slug,
+    aliases: [],
     path: joinVaultPath(outputFolder, CONTEXT_NODE_FOLDER[type], `${fileName}.md`),
     summary: item.summary,
     confidence: item.confidence,
@@ -255,27 +515,23 @@ function createNode(
   };
 }
 
-function mergeNodeEvidence(
-  node: GraphNode,
-  item: ExtractedContextItem,
-  input: ConversationExtraction,
-  sourcePath: string
-): void {
-  node.confidence = Math.max(node.confidence, item.confidence);
-  node.summary = mergeSummary(node.summary, item.summary);
+function mergeCandidateIntoNode(node: GraphNode, candidate: Candidate): void {
+  node.confidence = Math.max(node.confidence, candidate.item.confidence);
+  node.summary = mergeSummary(node.summary, candidate.item.summary);
   node.lastSeen =
-    input.conversation.updateTime ||
-    input.conversation.createTime ||
-    input.extraction.extractedAt ||
+    candidate.input.conversation.updateTime ||
+    candidate.input.conversation.createTime ||
+    candidate.input.extraction.extractedAt ||
     node.lastSeen;
-  node.sourceIds = uniqueBy([...node.sourceIds, input.conversation.sourceId], (sourceId) => sourceId);
+  node.sourceIds = uniqueStrings([...node.sourceIds, candidate.sourceId]);
+  addAlias(node, candidate.item.label);
 
-  const evidence = item.evidence.map<NodeEvidence>((entry) => ({
-    sourceId: input.conversation.sourceId,
-    sourceTitle: input.conversation.title,
-    sourcePath,
+  const evidence = candidate.item.evidence.map<NodeEvidence>((entry) => ({
+    sourceId: candidate.sourceId,
+    sourceTitle: candidate.input.conversation.title,
+    sourcePath: candidate.sourcePath,
     quote: entry.quote,
-    confidence: Math.min(item.confidence, entry.confidence)
+    confidence: Math.min(candidate.item.confidence, entry.confidence)
   }));
 
   node.evidence = uniqueBy(
@@ -283,10 +539,96 @@ function mergeNodeEvidence(
     (entry) => `${entry.sourceId}:${entry.quote}`
   )
     .sort((left, right) => right.confidence - left.confidence)
-    .slice(0, 20);
+    .slice(0, 30);
 }
 
-function addTypedNodeLinks(graph: BuiltContextGraph): void {
+function mergeSeedIntoNode(node: GraphNode, seed: CanonicalNodeSeed): void {
+  node.confidence = Math.max(node.confidence, seed.confidence);
+  node.summary = mergeSummary(node.summary, seed.summary);
+  node.lastSeen = maxStringDate(node.lastSeen, seed.lastSeen);
+  node.sourceIds = uniqueStrings([...node.sourceIds, ...seed.sourceIds]);
+  for (const alias of [seed.label, ...seed.aliases]) {
+    addAlias(node, alias);
+  }
+
+  node.evidence = uniqueBy(
+    [...node.evidence, ...seed.evidence],
+    (entry) => `${entry.sourceId}:${entry.quote}`
+  )
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, 30);
+}
+
+function addAlias(node: GraphNode, label: string): void {
+  const alias = label.trim();
+  if (!alias || slugify(alias) === node.slug) {
+    return;
+  }
+
+  node.aliases = uniqueStrings([...node.aliases, alias]).slice(0, 12);
+}
+
+function addSourceLink(
+  graph: BuiltContextGraph,
+  sourceId: string,
+  type: ContextNodeType,
+  node: GraphNode
+): void {
+  const linksForType = graph.sourceLinksById[sourceId][type] || [];
+  linksForType.push(node);
+  graph.sourceLinksById[sourceId][type] = uniqueBy(linksForType, (linkedNode) => linkedNode.id);
+}
+
+function capSourceLinks(
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+): number {
+  let removed = 0;
+  for (const linksByType of Object.values(graph.sourceLinksById)) {
+    for (const type of CONTEXT_NODE_TYPES) {
+      const links = linksByType[type] || [];
+      const sortedLinks = [...links].sort(compareLinkedNodes);
+      const capped = sortedLinks.slice(0, settings.maxSourceLinksPerType);
+      removed += Math.max(0, sortedLinks.length - capped.length);
+      linksByType[type] = capped;
+    }
+  }
+
+  return removed;
+}
+
+function compareLinkedNodes(left: GraphNode, right: GraphNode): number {
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  const evidenceDelta = right.evidence.length - left.evidence.length;
+  if (evidenceDelta !== 0) {
+    return evidenceDelta;
+  }
+
+  return left.label.localeCompare(right.label);
+}
+
+function rebuildEvidenceEdges(graph: BuiltContextGraph): void {
+  graph.edges = [];
+  for (const [sourceId, linksByType] of Object.entries(graph.sourceLinksById)) {
+    for (const nodes of Object.values(linksByType)) {
+      for (const node of nodes || []) {
+        const edge = buildEdge(sourceId, node);
+        if (!graph.edges.some((candidate) => candidate.id === edge.id)) {
+          graph.edges.push(edge);
+        }
+      }
+    }
+  }
+}
+
+function addSparseProjectLinks(
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+): void {
   for (const linksByType of Object.values(graph.sourceLinksById)) {
     const projects = linksByType.project || [];
     if (projects.length === 0) {
@@ -294,21 +636,12 @@ function addTypedNodeLinks(graph: BuiltContextGraph): void {
     }
 
     for (const project of projects) {
-      for (const type of [
-        "topic",
-        "preference",
-        "decision",
-        "task",
-        "artifact",
-        "entity",
-        "style_pattern"
-      ] satisfies ContextNodeType[]) {
-        const linkedNodes = (linksByType[type] || []).filter((node) => node.id !== project.id);
-        appendNodeLinks(graph, project.id, type, linkedNodes);
-        for (const linkedNode of linkedNodes) {
-          appendNodeLinks(graph, linkedNode.id, "project", [project]);
-          addRelatedEdge(graph, project, linkedNode);
-        }
+      for (const type of PROJECT_LINK_TYPES) {
+        const linkedNodes = (linksByType[type] || [])
+          .filter((node) => node.id !== project.id)
+          .sort(compareLinkedNodes)
+          .slice(0, settings.maxProjectLinksPerType);
+        appendNodeLinks(graph, project.id, type, linkedNodes, settings.maxProjectLinksPerType);
       }
     }
   }
@@ -318,7 +651,8 @@ function appendNodeLinks(
   graph: BuiltContextGraph,
   nodeId: string,
   type: ContextNodeType,
-  links: GraphNode[]
+  links: GraphNode[],
+  maxLinks: number
 ): void {
   if (links.length === 0) {
     return;
@@ -328,25 +662,9 @@ function appendNodeLinks(
   graph.nodeLinksById[nodeId] = {
     ...graph.nodeLinksById[nodeId],
     [type]: uniqueBy([...existing, ...links], (node) => node.id)
+      .sort(compareLinkedNodes)
+      .slice(0, maxLinks)
   };
-}
-
-function addRelatedEdge(graph: BuiltContextGraph, from: GraphNode, to: GraphNode): void {
-  const id = `${from.id}->${to.id}`;
-  if (graph.edges.some((edge) => edge.id === id)) {
-    return;
-  }
-
-  graph.edges.push({
-    id,
-    fromId: from.id,
-    toId: to.id,
-    edgeType: "related_to",
-    confidence: Math.min(from.confidence, to.confidence),
-    evidence: uniqueBy([...from.evidence, ...to.evidence], (entry) => `${entry.sourceId}:${entry.quote}`)
-      .sort((left, right) => right.confidence - left.confidence)
-      .slice(0, 4)
-  });
 }
 
 function mergeSummary(existing: string, incoming: string): string {
@@ -362,7 +680,7 @@ function mergeSummary(existing: string, incoming: string): string {
     return incoming;
   }
 
-  return `${existing} ${incoming}`.slice(0, 800);
+  return `${existing} ${incoming}`.slice(0, 900);
 }
 
 function buildEdge(sourceId: string, node: GraphNode): GraphEdge {
@@ -375,6 +693,73 @@ function buildEdge(sourceId: string, node: GraphNode): GraphEdge {
     confidence: node.confidence,
     evidence: node.evidence.filter((evidence) => evidence.sourceId === sourceId).slice(0, 3)
   };
+}
+
+function indexNode(node: GraphNode, nodeIndex: Map<string, GraphNode>): void {
+  for (const key of matchKeys(node.type, node.label, node.aliases)) {
+    nodeIndex.set(key, node);
+  }
+}
+
+function matchKeys(type: ContextNodeType, label: string, aliases: string[]): string[] {
+  return uniqueStrings([label, ...aliases].map((value) => `${type}:${slugify(value)}`));
+}
+
+function passesSemanticGuard(
+  leftLabel: string,
+  rightLabel: string,
+  similarity: number,
+  settings: PersonalContextGraphSettings
+): boolean {
+  if (similarity >= settings.semanticMergeThreshold + 0.05) {
+    return true;
+  }
+
+  const leftTokens = significantTokens(leftLabel);
+  const rightTokens = significantTokens(rightLabel);
+  return leftTokens.some((token) => rightTokens.includes(token));
+}
+
+function significantTokens(label: string): string[] {
+  const stopWords = new Set([
+    "with",
+    "from",
+    "into",
+    "that",
+    "this",
+    "over",
+    "using",
+    "based",
+    "system",
+    "project",
+    "logic"
+  ]);
+
+  return slugify(label)
+    .split("-")
+    .filter((token) => token.length >= 3 && !stopWords.has(token));
+}
+
+function labelNoiseScore(label: string): number {
+  let score = 0;
+  if (/\bchunk\b/i.test(label)) {
+    score += 10;
+  }
+  if (label.length > 80) {
+    score += 3;
+  }
+  if (/[^a-z0-9 ._-]/i.test(label)) {
+    score += 2;
+  }
+  return score;
+}
+
+function maxStringDate(left?: string, right?: string): string | undefined {
+  return [left, right].filter((value): value is string => Boolean(value)).sort().at(-1);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
 }
 
 export function buildSourcePath(

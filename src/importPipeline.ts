@@ -4,6 +4,7 @@ import { createGraphFileDrafts, buildAgentContextPath } from "./markdown";
 import type {
   AIProvider,
   BuiltContextGraph,
+  CanonicalNodeSeed,
   ConversationExtraction,
   ExtractedContext,
   ExtractedContextItem,
@@ -59,8 +60,11 @@ export async function runImport(
   conversations: ParsedConversation[],
   settings: PersonalContextGraphSettings,
   provider: AIProvider,
+  seedsOrProgress: CanonicalNodeSeed[] | ((progress: ImportProgress) => void) = [],
   onProgress?: (progress: ImportProgress) => void
 ): Promise<ImportArtifacts> {
+  const seeds = Array.isArray(seedsOrProgress) ? seedsOrProgress : [];
+  const progress = typeof seedsOrProgress === "function" ? seedsOrProgress : onProgress;
   const startedAt = nowIso();
   const selectedConversations = selectConversations(conversations, settings);
   const preview = createImportPreview("selected conversations", conversations, settings);
@@ -76,7 +80,7 @@ export async function runImport(
   const inputs: ConversationExtraction[] = [];
   for (let index = 0; index < selectedConversations.length; index += 1) {
     const conversation = selectedConversations[index];
-    onProgress?.({
+    progress?.({
       phase: "extracting",
       message: `Extracting context from ${conversation.title}`,
       completed: index,
@@ -87,15 +91,15 @@ export async function runImport(
     inputs.push({ conversation, extraction });
   }
 
-  onProgress?.({
+  progress?.({
     phase: "building-graph",
     message: "Building canonical context graph",
     completed: selectedConversations.length,
     total: selectedConversations.length
   });
-  const graph = await buildContextGraph(inputs, settings, provider);
+  const graph = await buildContextGraph(inputs, settings, provider, seeds);
 
-  onProgress?.({
+  progress?.({
     phase: "rendering",
     message: "Rendering Markdown graph files",
     completed: selectedConversations.length,
@@ -299,6 +303,11 @@ function createBaseReport(args: {
       ])
     ) as GraphBuildReport["nodeCountByType"],
     edgeCount: args.graph.edges.length,
+    seededNodeCount: args.graph.stats.seededNodes,
+    mergedCandidateCount: args.graph.stats.mergedCandidates,
+    newlyPromotedNodeCount: args.graph.stats.newlyPromotedNodes,
+    sourceOnlyCandidateCount: args.graph.stats.sourceOnlyCandidates,
+    prunedDuplicateNodeCount: args.graph.stats.prunedDuplicateNodes,
     agentContextPath: buildAgentContextPath(args.settings),
     startedAt: args.startedAt,
     completedAt: args.completedAt,

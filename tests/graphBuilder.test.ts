@@ -2,6 +2,7 @@ import { buildContextGraph } from "../src/graphBuilder";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import type {
   AIProvider,
+  CanonicalNodeSeed,
   ConversationExtraction,
   ExtractedContext,
   ParsedConversation
@@ -106,9 +107,131 @@ describe("context graph builder", () => {
 
     expect(project).toBeDefined();
     expect(graph.nodeLinksById[project!.id].task?.[0].label).toBe("Import ChatGPT data");
-    expect(graph.edges.some((edge) => edge.edgeType === "related_to")).toBe(true);
+    expect(graph.edges.every((edge) => edge.edgeType === "evidence_for")).toBe(true);
+  });
+
+  it("absorbs medium-confidence items into existing seeded canonical nodes", async () => {
+    const seed: CanonicalNodeSeed = {
+      type: "topic",
+      id: "topic_obsidian",
+      label: "Obsidian",
+      slug: "obsidian",
+      aliases: [],
+      path: "Context Graph/Topics/Obsidian.md",
+      summary: "Obsidian is the graph UI.",
+      confidence: 0.94,
+      evidence: [],
+      sourceIds: ["seed-source"]
+    };
+
+    const graph = await buildContextGraph(
+      [extractionInput("conv-medium", "Medium note", "Obsidian.md", 0.82)],
+      DEFAULT_SETTINGS,
+      provider,
+      [seed]
+    );
+
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].label).toBe("Obsidian");
+    expect(graph.nodes[0].aliases).toContain("Obsidian.md");
+    expect(graph.nodes[0].sourceIds).toContain("conv-medium");
+    expect(graph.stats.mergedCandidates).toBe(1);
+  });
+
+  it("promotes repeated medium-confidence clusters but keeps single medium items source-only", async () => {
+    const repeatedGraph = await buildContextGraph(
+      [
+        extractionInput("conv-a", "A", "Semantic topic", 0.82),
+        extractionInput("conv-b", "B", "Semantic topic", 0.81)
+      ],
+      DEFAULT_SETTINGS,
+      provider
+    );
+    const singleGraph = await buildContextGraph(
+      [extractionInput("conv-c", "C", "One-off topic", 0.82)],
+      DEFAULT_SETTINGS,
+      provider
+    );
+
+    expect(repeatedGraph.nodes).toHaveLength(1);
+    expect(repeatedGraph.nodes[0].sourceIds).toEqual(["conv-a", "conv-b"]);
+    expect(singleGraph.nodes).toHaveLength(0);
+    expect(singleGraph.stats.sourceOnlyCandidates).toBe(1);
+  });
+
+  it("prunes duplicate seeded canonical nodes by merging aliases and evidence", async () => {
+    const seeds: CanonicalNodeSeed[] = [
+      seed("topic", "AI scan evaluation", 0.92, ["conv-1"]),
+      seed("topic", "AI scan evaluation", 0.95, ["conv-2"])
+    ];
+
+    const graph = await buildContextGraph([], DEFAULT_SETTINGS, provider, seeds);
+
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].confidence).toBe(0.95);
+    expect(graph.nodes[0].sourceIds.sort()).toEqual(["conv-1", "conv-2"]);
+    expect(graph.stats.seededNodes).toBe(1);
+    expect(graph.stats.prunedDuplicateNodes).toBe(1);
+  });
+
+  it("caps visible source links per type", async () => {
+    const input = extractionInput("conv-many", "Many topics", "Topic 0", 0.96);
+    input.extraction.topics = Array.from({ length: 5 }, (_, index) => ({
+      label: `Topic ${index}`,
+      summary: `Topic ${index} summary.`,
+      confidence: 0.98 - index * 0.005,
+      evidence: [
+        {
+          quote: `Topic ${index} evidence.`,
+          turnRole: "user",
+          confidence: 0.98 - index * 0.005
+        }
+      ]
+    }));
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, maxSourceLinksPerType: 2 },
+      {
+        ...provider,
+        async embedText(text: string): Promise<number[]> {
+          const index = Number.parseInt(/Topic (\d)/.exec(text)?.[1] || "0", 10);
+          return Array.from({ length: 5 }, (_, vectorIndex) => (vectorIndex === index ? 1 : 0));
+        }
+      }
+    );
+
+    expect(graph.nodes).toHaveLength(5);
+    expect(graph.sourceLinksById["conv-many"].topic).toHaveLength(2);
+    expect(graph.stats.sourceOnlyCandidates).toBe(3);
   });
 });
+
+function seed(
+  type: CanonicalNodeSeed["type"],
+  label: string,
+  confidence: number,
+  sourceIds: string[]
+): CanonicalNodeSeed {
+  return {
+    type,
+    id: `${type}_${label.toLowerCase().replace(/\s+/g, "-")}`,
+    label,
+    slug: label.toLowerCase().replace(/\s+/g, "-"),
+    aliases: [],
+    path: `Context Graph/Topics/${label}.md`,
+    summary: `${label} summary.`,
+    confidence,
+    evidence: sourceIds.map((sourceId) => ({
+      sourceId,
+      sourceTitle: sourceId,
+      sourcePath: `Context Graph/Sources/ChatGPT/${sourceId}.md`,
+      quote: `${label} evidence ${sourceId}`,
+      confidence
+    })),
+    sourceIds
+  };
+}
 
 function extractionInput(
   sourceId: string,
