@@ -23,7 +23,7 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("OpenAI API key")
-      .setDesc("Used only after you explicitly confirm an import.")
+      .setDesc("Used only after you explicitly confirm an import. Not saved unless you enable key persistence below.")
       .addText((text) => {
         text.inputEl.type = "password";
         text
@@ -34,6 +34,16 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
             await this.host.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Remember API key on disk")
+      .setDesc("Off by default. When off, the key works for this Obsidian session but is not saved into plugin data.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.rememberOpenAiApiKey).onChange(async (value) => {
+          this.host.settings.rememberOpenAiApiKey = value;
+          await this.host.saveSettings();
+        })
+      );
 
     new Setting(containerEl)
       .setName("Extraction model")
@@ -105,16 +115,57 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Confidence threshold")
-      .setDesc("Items below this confidence are not written as graph links.")
+      .setDesc("Items below this confidence are not eligible for graph promotion.")
       .addSlider((slider) =>
         slider
-          .setLimits(0.5, 0.95, 0.01)
+          .setLimits(0.72, 0.95, 0.01)
           .setValue(this.host.settings.confidenceThreshold)
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.host.settings.confidenceThreshold = value;
+            this.host.settings.singleSourcePromotionThreshold = Math.max(
+              this.host.settings.singleSourcePromotionThreshold,
+              value
+            );
             await this.host.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Single-source promotion threshold")
+      .setDesc("A concept from one conversation must meet this confidence before becoming a canonical graph node.")
+      .addSlider((slider) =>
+        slider
+          .setLimits(0.78, 0.99, 0.01)
+          .setValue(this.host.settings.singleSourcePromotionThreshold)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.host.settings.singleSourcePromotionThreshold = Math.max(
+              value,
+              this.host.settings.confidenceThreshold
+            );
+            await this.host.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Link Agent Context into graph")
+      .setDesc("Off by default so Agent Context does not become a giant hub node.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.linkAgentContextToGraph).onChange(async (value) => {
+          this.host.settings.linkAgentContextToGraph = value;
+          await this.host.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Prune stale managed files")
+      .setDesc("Deletes old plugin-generated files that are no longer produced by the next import. Only files marked pcg_managed: true are deleted.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.pruneStaleManagedFiles).onChange(async (value) => {
+          this.host.settings.pruneStaleManagedFiles = value;
+          await this.host.saveSettings();
+        })
       );
   }
 }

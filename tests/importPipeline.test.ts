@@ -25,6 +25,12 @@ describe("import pipeline", () => {
     const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
     expect(sourceDraft?.content).toContain("pcg_managed: true");
     expect(sourceDraft?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+
+    const agentDraft = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context.md"));
+    expect(agentDraft?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(agentDraft?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+    expect(artifacts.checkpoint.sourceManifest).toHaveLength(1);
+    expect("conversations" in artifacts.checkpoint).toBe(false);
   });
 
   it("enforces cost caps before provider extraction", async () => {

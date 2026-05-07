@@ -7,7 +7,6 @@ import {
 import {
   applyWriteSummary,
   createImportPreview,
-  rebuildDraftsFromCheckpoint,
   runImport
 } from "./importPipeline";
 import { ImportConsentModal, ProgressModal, ZipImportModal } from "./modals";
@@ -19,7 +18,7 @@ import { ManagedVaultWriter } from "./vaultWriter";
 
 interface StoredPluginData {
   settings?: Partial<PersonalContextGraphSettings>;
-  checkpoint?: ImportCheckpoint;
+  checkpoint?: ImportCheckpoint | Record<string, unknown>;
 }
 
 export default class PersonalContextGraphPlugin extends Plugin {
@@ -67,11 +66,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
   async loadPluginData(): Promise<void> {
     const data = (await this.loadData()) as StoredPluginData | Partial<PersonalContextGraphSettings> | null;
     const settings = isStoredPluginData(data) ? data.settings : data;
-    this.settings = {
-      ...DEFAULT_SETTINGS,
-      ...(settings || {})
-    };
-    this.checkpoint = isStoredPluginData(data) ? data.checkpoint : undefined;
+    this.settings = migrateSettings(settings || {});
+    this.checkpoint = isStoredPluginData(data) ? migrateCheckpoint(data.checkpoint) : undefined;
   }
 
   async saveSettings(): Promise<void> {
@@ -80,7 +76,7 @@ export default class PersonalContextGraphPlugin extends Plugin {
 
   async savePluginData(): Promise<void> {
     await this.saveData({
-      settings: this.settings,
+      settings: settingsForStorage(this.settings),
       checkpoint: this.checkpoint
     } satisfies StoredPluginData);
   }
@@ -141,50 +137,14 @@ export default class PersonalContextGraphPlugin extends Plugin {
   }
 
   async rebuildGeneratedGraph(): Promise<void> {
-    if (!this.checkpoint) {
-      new Notice("No previous import checkpoint found.");
-      return;
-    }
-
-    try {
-      const settings = this.settingsForCheckpoint();
-      const artifacts = rebuildDraftsFromCheckpoint(this.checkpoint, settings);
-      const writer = new ManagedVaultWriter(this.app.vault, settings);
-      const writeSummary = await writer.writeDrafts(artifacts.drafts);
-      const report = applyWriteSummary(artifacts.report, writeSummary);
-
-      this.checkpoint = {
-        ...artifacts.checkpoint,
-        report
-      };
-      await this.savePluginData();
-      this.refreshDashboard();
-      new Notice(`Context graph rebuilt. Updated ${report.updatedFiles} files.`);
-    } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
-    }
+    new Notice("Rebuild now requires re-importing the ChatGPT ZIP. Full transcripts are no longer stored in plugin data.");
   }
 
   async exportAgentContextPack(): Promise<void> {
-    if (!this.checkpoint) {
-      new Notice("No previous import checkpoint found.");
-      return;
-    }
-
     try {
-      const settings = this.settingsForCheckpoint();
-      const artifacts = rebuildDraftsFromCheckpoint(this.checkpoint, settings);
-      const agentDraft = artifacts.drafts.find(
-        (draft) => draft.path === artifacts.report.agentContextPath
-      );
-      if (!agentDraft) {
-        throw new Error("Checkpoint did not contain an agent context draft.");
-      }
-
-      const writer = new ManagedVaultWriter(this.app.vault, settings);
-      await writer.writeDrafts([agentDraft]);
-      await this.openVaultFile(agentDraft.path);
-      new Notice("Agent context pack exported.");
+      const path = this.checkpoint?.report.agentContextPath || `${this.settings.outputFolder}/Agent Context.md`;
+      await this.openVaultFile(path);
+      new Notice("Opened agent context pack.");
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
     }
@@ -205,19 +165,6 @@ export default class PersonalContextGraphPlugin extends Plugin {
       active: true
     });
     this.app.workspace.revealLeaf(leaf);
-  }
-
-  private settingsForCheckpoint(): PersonalContextGraphSettings {
-    const outputFolder = this.checkpoint?.settingsSnapshot.outputFolder;
-    if (typeof outputFolder === "string" && outputFolder !== this.settings.outputFolder) {
-      new Notice(`Using checkpoint output folder: ${outputFolder}`);
-      return {
-        ...this.settings,
-        outputFolder
-      };
-    }
-
-    return this.settings;
   }
 
   private refreshDashboard(): void {
@@ -242,4 +189,89 @@ function isStoredPluginData(value: unknown): value is StoredPluginData {
     value !== null &&
     ("settings" in value || "checkpoint" in value)
   );
+}
+
+function migrateSettings(
+  value: Partial<PersonalContextGraphSettings>
+): PersonalContextGraphSettings {
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    ...value,
+    rememberOpenAiApiKey: value.rememberOpenAiApiKey ?? false,
+    linkAgentContextToGraph: value.linkAgentContextToGraph ?? false,
+    pruneStaleManagedFiles: value.pruneStaleManagedFiles ?? true
+  };
+
+  if (!settings.rememberOpenAiApiKey) {
+    settings.openAiApiKey = value.openAiApiKey || "";
+  }
+
+  if (settings.confidenceThreshold < 0.72) {
+    settings.confidenceThreshold = DEFAULT_SETTINGS.confidenceThreshold;
+  }
+
+  if (settings.singleSourcePromotionThreshold < settings.confidenceThreshold) {
+    settings.singleSourcePromotionThreshold = Math.max(
+      DEFAULT_SETTINGS.singleSourcePromotionThreshold,
+      settings.confidenceThreshold
+    );
+  }
+
+  return settings;
+}
+
+function settingsForStorage(
+  settings: PersonalContextGraphSettings
+): PersonalContextGraphSettings {
+  return {
+    ...settings,
+    openAiApiKey: settings.rememberOpenAiApiKey ? settings.openAiApiKey : ""
+  };
+}
+
+function migrateCheckpoint(value: unknown): ImportCheckpoint | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const checkpoint = value as Record<string, unknown>;
+  const report = checkpoint.report;
+  if (!report || typeof report !== "object") {
+    return undefined;
+  }
+
+  if (Array.isArray(checkpoint.sourceManifest)) {
+    return checkpoint as unknown as ImportCheckpoint;
+  }
+
+  const graph = checkpoint.graph as
+    | {
+        sourcePathsById?: Record<string, string>;
+      }
+    | undefined;
+  const conversations = Array.isArray(checkpoint.conversations)
+    ? (checkpoint.conversations as Array<Record<string, unknown>>)
+    : [];
+
+  return {
+    importId: String(checkpoint.importId || "legacy_import"),
+    createdAt: String(checkpoint.createdAt || new Date().toISOString()),
+    settingsSnapshot:
+      typeof checkpoint.settingsSnapshot === "object" && checkpoint.settingsSnapshot
+        ? (checkpoint.settingsSnapshot as Record<string, unknown>)
+        : {},
+    sourceManifest: conversations.map((conversation) => {
+      const sourceId = String(conversation.sourceId || "");
+      return {
+        sourceId,
+        title: String(conversation.title || "Untitled conversation"),
+        path: graph?.sourcePathsById?.[sourceId] || "",
+        createTime:
+          typeof conversation.createTime === "string" ? conversation.createTime : undefined,
+        updateTime:
+          typeof conversation.updateTime === "string" ? conversation.updateTime : undefined
+      };
+    }),
+    report: report as ImportCheckpoint["report"]
+  };
 }

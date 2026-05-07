@@ -12,11 +12,15 @@ export class ManagedVaultWriter {
     const summary: WriteSummary = {
       created: 0,
       updated: 0,
+      deleted: 0,
       skipped: 0,
       warnings: []
     };
 
     await this.ensureFolder(this.settings.outputFolder);
+    if (this.settings.pruneStaleManagedFiles) {
+      summary.deleted += await this.deleteStaleManagedFiles(drafts);
+    }
 
     for (const draft of drafts) {
       const path = normalizePath(draft.path);
@@ -74,6 +78,26 @@ export class ManagedVaultWriter {
   private isInsideOutputFolder(path: string): boolean {
     const outputFolder = normalizePath(this.settings.outputFolder);
     return path === outputFolder || path.startsWith(`${outputFolder}/`);
+  }
+
+  private async deleteStaleManagedFiles(drafts: FileDraft[]): Promise<number> {
+    const draftPaths = new Set(drafts.map((draft) => normalizePath(draft.path)));
+    const files = this.vault
+      .getFiles()
+      .filter((file) => this.isInsideOutputFolder(file.path) && !draftPaths.has(file.path));
+    let deleted = 0;
+
+    for (const file of files) {
+      const content = await this.vault.read(file);
+      if (!isManagedContent(content)) {
+        continue;
+      }
+
+      await this.vault.delete(file);
+      deleted += 1;
+    }
+
+    return deleted;
   }
 }
 

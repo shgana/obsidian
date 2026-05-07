@@ -145,6 +145,7 @@ export interface BuiltContextGraph {
   edges: GraphEdge[];
   sourcePathsById: Record<string, string>;
   sourceLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
+  nodeLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   warnings: string[];
 }
 
@@ -163,6 +164,7 @@ export interface GraphBuildReport {
   skippedConversationCount: number;
   createdFiles: number;
   updatedFiles: number;
+  deletedFiles: number;
   skippedFiles: number;
   nodeCountByType: Record<ContextNodeType, number>;
   edgeCount: number;
@@ -178,10 +180,16 @@ export interface ImportCheckpoint {
   importId: string;
   createdAt: string;
   settingsSnapshot: Record<string, unknown>;
-  conversations: ParsedConversation[];
-  extractions: ExtractedContext[];
-  graph: BuiltContextGraph;
+  sourceManifest: SourceManifestEntry[];
   report: GraphBuildReport;
+}
+
+export interface SourceManifestEntry {
+  sourceId: string;
+  title: string;
+  path: string;
+  createTime?: string;
+  updateTime?: string;
 }
 
 export interface AIProvider {
@@ -198,6 +206,7 @@ export interface FileDraft {
 export interface WriteSummary {
   created: number;
   updated: number;
+  deleted: number;
   skipped: number;
   warnings: string[];
 }

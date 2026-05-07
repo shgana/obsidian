@@ -34,6 +34,7 @@ export async function buildContextGraph(
     edges: [],
     sourcePathsById: {},
     sourceLinksById: {},
+    nodeLinksById: {},
     warnings: []
   };
 
@@ -46,9 +47,14 @@ export async function buildContextGraph(
 
     for (const type of CONTEXT_NODE_TYPES) {
       const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
-      const acceptedItems = items.filter(
-        (item) => item.confidence >= settings.confidenceThreshold && item.evidence.length > 0
-      );
+      const acceptedItems = prioritizeItems(type, items)
+        .map((item) => normalizeItemForGraph(item, input))
+        .filter(
+          (item) =>
+            item.confidence >= settings.confidenceThreshold &&
+            item.confidence >= settings.singleSourcePromotionThreshold &&
+            item.evidence.length > 0
+        );
 
       for (const item of acceptedItems) {
         const node = await findOrCreateNode({
@@ -84,9 +90,63 @@ export async function buildContextGraph(
     }
   }
 
+  addTypedNodeLinks(graph);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
   return graph;
+}
+
+const GRAPH_ITEM_LIMITS: Record<ContextNodeType, number> = {
+  topic: 10,
+  entity: 8,
+  project: 5,
+  preference: 7,
+  decision: 7,
+  task: 8,
+  artifact: 7,
+  style_pattern: 5
+};
+
+function prioritizeItems(
+  type: ContextNodeType,
+  items: ExtractedContextItem[]
+): ExtractedContextItem[] {
+  return [...items]
+    .sort((left, right) => {
+      const confidenceDelta = right.confidence - left.confidence;
+      if (confidenceDelta !== 0) {
+        return confidenceDelta;
+      }
+
+      return right.evidence.length - left.evidence.length;
+    })
+    .slice(0, GRAPH_ITEM_LIMITS[type]);
+}
+
+function normalizeItemForGraph(
+  item: ExtractedContextItem,
+  input: ConversationExtraction
+): ExtractedContextItem {
+  const label = normalizeLabel(item.label, input.conversation.title);
+  return {
+    ...item,
+    label
+  };
+}
+
+function normalizeLabel(label: string, conversationTitle: string): string {
+  const cleanConversationTitle = conversationTitle.replace(/\s+\(chunk\s+\d+\)$/i, "").trim();
+  const cleaned = label
+    .replace(/\s+\(chunk\s+\d+\)$/gi, "")
+    .replace(/\bchunk\s+\d+\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) {
+    return cleanConversationTitle;
+  }
+
+  return cleaned;
 }
 
 interface FindOrCreateNodeArgs {
@@ -224,6 +284,69 @@ function mergeNodeEvidence(
   )
     .sort((left, right) => right.confidence - left.confidence)
     .slice(0, 20);
+}
+
+function addTypedNodeLinks(graph: BuiltContextGraph): void {
+  for (const linksByType of Object.values(graph.sourceLinksById)) {
+    const projects = linksByType.project || [];
+    if (projects.length === 0) {
+      continue;
+    }
+
+    for (const project of projects) {
+      for (const type of [
+        "topic",
+        "preference",
+        "decision",
+        "task",
+        "artifact",
+        "entity",
+        "style_pattern"
+      ] satisfies ContextNodeType[]) {
+        const linkedNodes = (linksByType[type] || []).filter((node) => node.id !== project.id);
+        appendNodeLinks(graph, project.id, type, linkedNodes);
+        for (const linkedNode of linkedNodes) {
+          appendNodeLinks(graph, linkedNode.id, "project", [project]);
+          addRelatedEdge(graph, project, linkedNode);
+        }
+      }
+    }
+  }
+}
+
+function appendNodeLinks(
+  graph: BuiltContextGraph,
+  nodeId: string,
+  type: ContextNodeType,
+  links: GraphNode[]
+): void {
+  if (links.length === 0) {
+    return;
+  }
+
+  const existing = graph.nodeLinksById[nodeId]?.[type] || [];
+  graph.nodeLinksById[nodeId] = {
+    ...graph.nodeLinksById[nodeId],
+    [type]: uniqueBy([...existing, ...links], (node) => node.id)
+  };
+}
+
+function addRelatedEdge(graph: BuiltContextGraph, from: GraphNode, to: GraphNode): void {
+  const id = `${from.id}->${to.id}`;
+  if (graph.edges.some((edge) => edge.id === id)) {
+    return;
+  }
+
+  graph.edges.push({
+    id,
+    fromId: from.id,
+    toId: to.id,
+    edgeType: "related_to",
+    confidence: Math.min(from.confidence, to.confidence),
+    evidence: uniqueBy([...from.evidence, ...to.evidence], (entry) => `${entry.sourceId}:${entry.quote}`)
+      .sort((left, right) => right.confidence - left.confidence)
+      .slice(0, 4)
+  });
 }
 
 function mergeSummary(existing: string, incoming: string): string {

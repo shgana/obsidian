@@ -3,6 +3,7 @@ import { buildContextGraph } from "./graphBuilder";
 import { createGraphFileDrafts, buildAgentContextPath } from "./markdown";
 import type {
   AIProvider,
+  BuiltContextGraph,
   ConversationExtraction,
   ExtractedContext,
   ExtractedContextItem,
@@ -26,7 +27,7 @@ export interface ImportProgress {
 
 export interface ImportArtifacts {
   inputs: ConversationExtraction[];
-  graph: ImportCheckpoint["graph"];
+  graph: BuiltContextGraph;
   drafts: FileDraft[];
   checkpoint: ImportCheckpoint;
   report: GraphBuildReport;
@@ -115,9 +116,13 @@ export async function runImport(
     importId: `import_${hashString(`${startedAt}:${selectedConversations.length}`)}`,
     createdAt: completedAt,
     settingsSnapshot: sanitizeSettingsSnapshot(settings),
-    conversations: selectedConversations,
-    extractions: inputs.map((input) => input.extraction),
-    graph,
+    sourceManifest: selectedConversations.map((conversation) => ({
+      sourceId: conversation.sourceId,
+      title: conversation.title,
+      path: graph.sourcePathsById[conversation.sourceId],
+      createTime: conversation.createTime,
+      updateTime: conversation.updateTime
+    })),
     report
   };
 
@@ -134,35 +139,10 @@ export function rebuildDraftsFromCheckpoint(
   checkpoint: ImportCheckpoint,
   settings: PersonalContextGraphSettings
 ): ImportArtifacts {
-  const inputs = checkpoint.conversations.map<ConversationExtraction>((conversation) => {
-    const extraction = checkpoint.extractions.find(
-      (candidate) => candidate.sourceId === conversation.sourceId
-    );
-
-    if (!extraction) {
-      throw new Error(`Checkpoint is missing extraction for ${conversation.title}.`);
-    }
-
-    return { conversation, extraction };
-  });
-  const drafts = createGraphFileDrafts(inputs, checkpoint.graph, settings);
-  const report: GraphBuildReport = {
-    ...checkpoint.report,
-    startedAt: nowIso(),
-    completedAt: nowIso(),
-    warnings: [...checkpoint.report.warnings, "Rebuilt from cached extraction checkpoint."]
-  };
-
-  return {
-    inputs,
-    graph: checkpoint.graph,
-    drafts,
-    checkpoint: {
-      ...checkpoint,
-      report
-    },
-    report
-  };
+  void settings;
+  throw new Error(
+    "This plugin version no longer stores full transcripts/extractions in plugin data. Re-import the ChatGPT ZIP to rebuild the graph."
+  );
 }
 
 export function applyWriteSummary(
@@ -173,6 +153,7 @@ export function applyWriteSummary(
     ...report,
     createdFiles: summary.created,
     updatedFiles: summary.updated,
+    deletedFiles: summary.deleted,
     skippedFiles: summary.skipped,
     warnings: [...report.warnings, ...summary.warnings]
   };
@@ -246,7 +227,7 @@ function buildChunkConversation(
   return {
     ...conversation,
     sourceId: `${conversation.sourceId}#chunk-${index + 1}`,
-    title: `${conversation.title} (chunk ${index + 1})`,
+    title: conversation.title,
     turns
   };
 }
@@ -299,7 +280,7 @@ function createBaseReport(args: {
   completedAt: string;
   conversations: ParsedConversation[];
   selectedConversations: ParsedConversation[];
-  graph: ImportCheckpoint["graph"];
+  graph: BuiltContextGraph;
   preview: ImportPreview;
   settings: PersonalContextGraphSettings;
 }): GraphBuildReport {
@@ -309,6 +290,7 @@ function createBaseReport(args: {
     skippedConversationCount: args.conversations.length - args.selectedConversations.length,
     createdFiles: 0,
     updatedFiles: 0,
+    deletedFiles: 0,
     skippedFiles: 0,
     nodeCountByType: Object.fromEntries(
       NODE_TYPES.map((type) => [

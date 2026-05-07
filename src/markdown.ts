@@ -6,12 +6,13 @@ import {
   type BuiltContextGraph,
   type ContextNodeType,
   type ConversationExtraction,
+  type ExtractedContextItem,
   type FileDraft,
   type GraphNode,
   type NodeEvidence
 } from "./types";
 import { conversationToTranscript } from "./conversationText";
-import { hashString, truncate } from "./text";
+import { hashString, slugify, truncate } from "./text";
 import { joinVaultPath } from "./graphBuilder";
 
 export function createGraphFileDrafts(
@@ -32,14 +33,14 @@ export function createGraphFileDrafts(
   for (const node of graph.nodes) {
     drafts.push({
       path: node.path,
-      content: renderNodeNote(node),
+      content: renderNodeNote(node, graph),
       managed: true
     });
   }
 
   drafts.push({
     path: buildAgentContextPath(settings),
-    content: renderAgentContext(inputs, graph),
+    content: renderAgentContext(inputs, graph, settings),
     managed: true
   });
 
@@ -81,6 +82,9 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
     "## Context Links",
     renderTypedLinks(linksByType),
     "",
+    "## Source-Only Context",
+    renderSourceOnlyContext(input, linksByType),
+    "",
     "## Extracted Evidence",
     renderSourceEvidence(input, graph),
     "",
@@ -89,10 +93,11 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
   ].join("\n");
 }
 
-function renderNodeNote(node: GraphNode): string {
+function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
   const sourceLinks = node.evidence.map((evidence) =>
     wikiLink(evidence.sourcePath, evidence.sourceTitle)
   );
+  const relatedLinks = graph.nodeLinksById[node.id] || {};
 
   return [
     yamlFrontmatter({
@@ -113,6 +118,9 @@ function renderNodeNote(node: GraphNode): string {
     "## Evidence",
     renderEvidenceList(node.evidence),
     "",
+    "## Related Context",
+    renderTypedLinks(relatedLinks),
+    "",
     "## Source Conversations",
     uniqueStrings(sourceLinks)
       .map((link) => `- ${link}`)
@@ -120,7 +128,11 @@ function renderNodeNote(node: GraphNode): string {
   ].join("\n");
 }
 
-function renderAgentContext(inputs: ConversationExtraction[], graph: BuiltContextGraph): string {
+function renderAgentContext(
+  inputs: ConversationExtraction[],
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+): string {
   return [
     yamlFrontmatter({
       pcg_type: "agent_context",
@@ -138,14 +150,17 @@ function renderAgentContext(inputs: ConversationExtraction[], graph: BuiltContex
     "",
     ...CONTEXT_NODE_TYPES.flatMap((type) => [
       `## ${CONTEXT_NODE_PLURAL_LABEL[type]}`,
-      renderTopNodes(graph.nodes.filter((node) => node.type === type)),
+      renderTopNodes(graph.nodes.filter((node) => node.type === type), settings.linkAgentContextToGraph),
       ""
     ]),
     "## Source Conversations",
     inputs
       .map((input) => {
         const path = graph.sourcePathsById[input.conversation.sourceId];
-        return `- ${wikiLink(path, input.conversation.title)}: ${input.extraction.summary}`;
+        const label = settings.linkAgentContextToGraph
+          ? wikiLink(path, input.conversation.title)
+          : `${input.conversation.title} (${path})`;
+        return `- ${label}: ${input.extraction.summary}`;
       })
       .join("\n")
   ].join("\n");
@@ -160,7 +175,7 @@ function renderProfileSummary(inputs: ConversationExtraction[]): string {
   return summaries.length > 0 ? summaries.join("\n") : "No high-confidence context extracted yet.";
 }
 
-function renderTopNodes(nodes: GraphNode[]): string {
+function renderTopNodes(nodes: GraphNode[], useWikiLinks: boolean): string {
   const topNodes = nodes
     .sort((left, right) => {
       const confidenceDelta = right.confidence - left.confidence;
@@ -181,7 +196,8 @@ function renderTopNodes(nodes: GraphNode[]): string {
       const evidencePreview = node.evidence[0]
         ? ` Evidence: "${truncate(node.evidence[0].quote, 160)}"`
         : "";
-      return `- ${wikiLink(node.path, node.label)} (${round(node.confidence)}, ${
+      const label = useWikiLinks ? wikiLink(node.path, node.label) : `${node.label} (${node.path})`;
+      return `- ${label} (${round(node.confidence)}, ${
         node.evidence.length
       } evidence item${node.evidence.length === 1 ? "" : "s"}): ${node.summary}${evidencePreview}`;
     })
@@ -230,6 +246,53 @@ function renderSourceEvidence(input: ConversationExtraction, graph: BuiltContext
   }
 
   return lines.join("\n").trim() || "No high-confidence evidence extracted.";
+}
+
+const EXTRACTION_ITEMS_BY_TYPE: Record<
+  ContextNodeType,
+  keyof ConversationExtraction["extraction"]
+> = {
+  topic: "topics",
+  entity: "entities",
+  project: "projects",
+  preference: "preferences",
+  decision: "decisions",
+  task: "tasks",
+  artifact: "artifacts",
+  style_pattern: "stylePatterns"
+};
+
+function renderSourceOnlyContext(
+  input: ConversationExtraction,
+  linksByType: Partial<Record<ContextNodeType, GraphNode[]>>
+): string {
+  const lines: string[] = [];
+
+  for (const type of CONTEXT_NODE_TYPES) {
+    const promotedSlugs = new Set((linksByType[type] || []).map((node) => node.slug));
+    const items = input.extraction[EXTRACTION_ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
+    const sourceOnlyItems = items
+      .filter((item) => !promotedSlugs.has(slugify(item.label.replace(/\s+\(chunk\s+\d+\)$/i, ""))))
+      .sort((left, right) => right.confidence - left.confidence)
+      .slice(0, 8);
+
+    if (sourceOnlyItems.length === 0) {
+      continue;
+    }
+
+    lines.push(`### ${CONTEXT_NODE_PLURAL_LABEL[type]}`);
+    for (const item of sourceOnlyItems) {
+      const evidence = item.evidence[0]?.quote;
+      lines.push(
+        `- ${item.label} (${round(item.confidence)}): ${item.summary}${
+          evidence ? ` Evidence: "${truncate(evidence, 180)}"` : ""
+        }`
+      );
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trim() || "No source-only context retained.";
 }
 
 function renderEvidenceList(evidence: NodeEvidence[]): string {

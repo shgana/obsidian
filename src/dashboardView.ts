@@ -77,6 +77,9 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Files updated: ${report.updatedFiles}`
   });
   list.createEl("li", {
+    text: `Files deleted: ${report.deletedFiles}`
+  });
+  list.createEl("li", {
     text: `Files skipped: ${report.skippedFiles}`
   });
   list.createEl("li", {

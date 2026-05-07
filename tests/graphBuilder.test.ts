@@ -48,6 +48,66 @@ describe("context graph builder", () => {
     expect(graph.nodes).toHaveLength(0);
     expect(graph.edges).toHaveLength(0);
   });
+
+  it("does not promote medium-confidence single-source items", async () => {
+    const graph = await buildContextGraph(
+      [extractionInput("conv-medium", "Medium note", "Medium Topic", 0.82)],
+      DEFAULT_SETTINGS,
+      provider
+    );
+
+    expect(graph.nodes).toHaveLength(0);
+  });
+
+  it("removes chunk markers from canonical labels", async () => {
+    const graph = await buildContextGraph(
+      [extractionInput("conv-chunk", "AI Accuracy Improvement", "AI Accuracy Improvement (chunk 2)", 0.95)],
+      DEFAULT_SETTINGS,
+      provider
+    );
+
+    expect(graph.nodes[0].label).toBe("AI Accuracy Improvement");
+    expect(graph.nodes[0].path).not.toContain("chunk");
+  });
+
+  it("adds typed related context links from projects", async () => {
+    const input = extractionInput("conv-project", "Project note", "Obsidian", 0.95);
+    input.extraction.projects = [
+      {
+        label: "Personal context graph",
+        summary: "A project to build a context graph.",
+        confidence: 0.95,
+        evidence: [
+          {
+            quote: "Build a personal context graph.",
+            turnRole: "user",
+            confidence: 0.95
+          }
+        ]
+      }
+    ];
+    input.extraction.tasks = [
+      {
+        label: "Import ChatGPT data",
+        summary: "Import ChatGPT data into Obsidian.",
+        confidence: 0.94,
+        evidence: [
+          {
+            quote: "Import ChatGPT data.",
+            turnRole: "user",
+            confidence: 0.94
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const project = graph.nodes.find((node) => node.type === "project");
+
+    expect(project).toBeDefined();
+    expect(graph.nodeLinksById[project!.id].task?.[0].label).toBe("Import ChatGPT data");
+    expect(graph.edges.some((edge) => edge.edgeType === "related_to")).toBe(true);
+  });
 });
 
 function extractionInput(
