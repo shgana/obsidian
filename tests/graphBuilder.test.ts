@@ -62,12 +62,12 @@ describe("context graph builder", () => {
 
   it("removes chunk markers from canonical labels", async () => {
     const graph = await buildContextGraph(
-      [extractionInput("conv-chunk", "AI Accuracy Improvement", "AI Accuracy Improvement (chunk 2)", 0.95)],
+      [extractionInput("conv-chunk", "AI Scan Accuracy Improvement", "AI Scan Accuracy Improvement (chunk 2)", 0.99)],
       DEFAULT_SETTINGS,
       provider
     );
 
-    expect(graph.nodes[0].label).toBe("AI Accuracy Improvement");
+    expect(graph.nodes[0].label).toBe("AI Scan Accuracy Improvement");
     expect(graph.nodes[0].path).not.toContain("chunk");
   });
 
@@ -102,7 +102,11 @@ describe("context graph builder", () => {
       }
     ];
 
-    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
     const project = graph.nodes.find((node) => node.type === "project");
 
     expect(project).toBeDefined();
@@ -165,13 +169,56 @@ describe("context graph builder", () => {
       seed("topic", "AI scan evaluation", 0.95, ["conv-2"])
     ];
 
-    const graph = await buildContextGraph([], DEFAULT_SETTINGS, provider, seeds);
+    const graph = await buildContextGraph(
+      [extractionInput("conv-3", "Current scan note", "AI scan evaluation", 0.82)],
+      DEFAULT_SETTINGS,
+      provider,
+      seeds
+    );
 
     expect(graph.nodes).toHaveLength(1);
     expect(graph.nodes[0].confidence).toBe(0.95);
-    expect(graph.nodes[0].sourceIds.sort()).toEqual(["conv-1", "conv-2"]);
+    expect(graph.nodes[0].sourceIds.sort()).toEqual(["conv-1", "conv-2", "conv-3"]);
     expect(graph.stats.seededNodes).toBe(1);
     expect(graph.stats.prunedDuplicateNodes).toBe(1);
+  });
+
+  it("uses unmatched seed nodes for matching only and omits them from visible graph drafts", async () => {
+    const graph = await buildContextGraph(
+      [],
+      DEFAULT_SETTINGS,
+      provider,
+      [seed("topic", "Old topic island", 0.95, ["old-conv"])]
+    );
+
+    expect(graph.nodes).toHaveLength(0);
+    expect(graph.stats.seededNodes).toBe(0);
+    expect(graph.stats.unmatchedSeedNodes).toBe(1);
+    expect(graph.stats.visibleCanonicalNodes).toBe(0);
+  });
+
+  it("consolidates project variants into a durable project survivor", async () => {
+    const input = extractionInput("conv-project-variants", "AI Accuracy Improvement", "placeholder", 0.8);
+    input.extraction.topics = [];
+    input.extraction.projects = [
+      graphItem(
+        "BodyScanner fitness AI feature",
+        "BodyScanner uses scan evaluation and workout generation for fitness analysis.",
+        0.99
+      ),
+      graphItem(
+        "AI scan evaluation improvement project",
+        "Improve Scann AI body scan evaluation and workout generation.",
+        0.98
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const projects = graph.nodes.filter((node) => node.type === "project");
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0].aliases).toContain("AI scan evaluation improvement project");
+    expect(graph.sourceLinksById["conv-project-variants"].project).toHaveLength(1);
   });
 
   it("caps visible source links per type", async () => {
@@ -191,7 +238,7 @@ describe("context graph builder", () => {
 
     const graph = await buildContextGraph(
       [input],
-      { ...DEFAULT_SETTINGS, maxSourceLinksPerType: 2 },
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1, maxSourceLinksPerType: 2 },
       {
         ...provider,
         async embedText(text: string): Promise<number[]> {
@@ -201,9 +248,10 @@ describe("context graph builder", () => {
       }
     );
 
-    expect(graph.nodes).toHaveLength(5);
+    expect(graph.nodes).toHaveLength(2);
     expect(graph.sourceLinksById["conv-many"].topic).toHaveLength(2);
     expect(graph.stats.sourceOnlyCandidates).toBe(3);
+    expect(graph.stats.isolatedCanonicalNodes).toBe(0);
   });
 });
 
@@ -265,9 +313,9 @@ function extractionInput(
           label: topicLabel,
           summary: `${topicLabel} is relevant to the user's graph UI work.`,
           confidence,
-          evidence: [
-            {
-              quote: `Let's use ${topicLabel} for agent memory.`,
+      evidence: [
+        {
+          quote: `Let's use ${topicLabel} for agent memory.`,
               turnRole: "user",
               confidence
             }
@@ -283,5 +331,24 @@ function extractionInput(
       stylePatterns: [],
       extractedAt: "2026-05-06T00:00:00.000Z"
     }
+  };
+}
+
+function graphItem(
+  label: string,
+  summary: string,
+  confidence: number
+): ExtractedContext["topics"][number] {
+  return {
+    label,
+    summary,
+    confidence,
+    evidence: [
+      {
+        quote: `${label}: ${summary}`,
+        turnRole: "user",
+        confidence
+      }
+    ]
   };
 }

@@ -8,7 +8,8 @@ describe("import pipeline", () => {
       ...DEFAULT_SETTINGS,
       openAiApiKey: "test",
       costCapUsd: 10,
-      outputFolder: "Context Graph"
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1
     };
 
     const artifacts = await runImport(

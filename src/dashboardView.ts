@@ -71,7 +71,16 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Graph edges: ${report.edgeCount}`
   });
   list.createEl("li", {
+    text: `Visible canonical nodes: ${report.visibleCanonicalNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Isolated canonical nodes: ${report.isolatedCanonicalNodeCount ?? 0}`
+  });
+  list.createEl("li", {
     text: `Seeded canonical nodes: ${report.seededNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Unmatched seed nodes: ${report.unmatchedSeedNodeCount ?? 0}`
   });
   list.createEl("li", {
     text: `New canonical nodes: ${report.newlyPromotedNodeCount ?? 0}`
@@ -81,6 +90,9 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
   });
   list.createEl("li", {
     text: `Source-only candidates: ${report.sourceOnlyCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Demoted candidates: ${report.demotedCandidateCount ?? 0}`
   });
   list.createEl("li", {
     text: `Pruned duplicate nodes: ${report.prunedDuplicateNodeCount ?? 0}`

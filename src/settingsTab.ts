@@ -133,7 +133,7 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Single-source promotion threshold")
-      .setDesc("A concept from one conversation must meet this confidence before becoming a canonical graph node.")
+      .setDesc("A concept from one conversation must meet this confidence and pass type-specific durability checks before becoming a canonical graph node.")
       .addSlider((slider) =>
         slider
           .setLimits(0.78, 0.99, 0.01)

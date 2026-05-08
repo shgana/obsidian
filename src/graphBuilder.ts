@@ -64,6 +64,13 @@ interface CandidateCluster {
   embedding?: number[];
 }
 
+interface MatchRegistry {
+  nodes: GraphNode[];
+  nodeIndex: Map<string, GraphNode>;
+  seedNodeIds: Set<string>;
+  activeNodeIds: Set<string>;
+}
+
 export async function buildContextGraph(
   inputs: ConversationExtraction[],
   settings: PersonalContextGraphSettings,
@@ -80,8 +87,13 @@ export async function buildContextGraph(
     stats: createStats()
   };
 
-  const nodeIndex = new Map<string, GraphNode>();
-  await seedCanonicalNodes(graph, nodeIndex, seeds, settings, provider);
+  const registry: MatchRegistry = {
+    nodes: [],
+    nodeIndex: new Map<string, GraphNode>(),
+    seedNodeIds: new Set<string>(),
+    activeNodeIds: new Set<string>()
+  };
+  await seedCanonicalNodes(graph, registry, seeds, settings, provider);
 
   const unmatchedCandidates: Candidate[] = [];
   for (const input of inputs) {
@@ -103,10 +115,11 @@ export async function buildContextGraph(
         }));
 
       for (const candidate of candidates) {
-        const existingNode = await findNodeMatch(candidate, graph, nodeIndex, settings, provider);
+        const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
         if (existingNode) {
+          activateNode(graph, registry, existingNode);
           mergeCandidateIntoNode(existingNode, candidate);
-          indexNode(existingNode, nodeIndex);
+          indexNode(existingNode, registry.nodeIndex);
           addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
           graph.stats.mergedCandidates += 1;
         } else {
@@ -133,22 +146,26 @@ export async function buildContextGraph(
         slugify(representative.item.label)
       );
 
-      graph.nodes.push(node);
+      registerNodeForMatching(registry, node, false);
+      activateNode(graph, registry, node);
       graph.stats.newlyPromotedNodes += 1;
       for (const candidate of cluster.candidates) {
         mergeCandidateIntoNode(node, candidate);
         addSourceLink(graph, candidate.sourceId, candidate.type, node);
       }
       graph.stats.mergedCandidates += Math.max(0, cluster.candidates.length - 1);
-      indexNode(node, nodeIndex);
+      indexNode(node, registry.nodeIndex);
     } else {
       graph.stats.sourceOnlyCandidates += cluster.candidates.length;
+      graph.stats.demotedCandidates += cluster.candidates.length;
     }
   }
 
   graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
-  rebuildEvidenceEdges(graph);
   addSparseProjectLinks(graph, settings);
+  graph.stats.demotedCandidates += applyGraphHygiene(graph, registry);
+  rebuildEvidenceEdges(graph);
+  finalizeGraphStats(graph, registry);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
   return graph;
@@ -160,13 +177,17 @@ function createStats(): GraphBuildStats {
     mergedCandidates: 0,
     newlyPromotedNodes: 0,
     sourceOnlyCandidates: 0,
-    prunedDuplicateNodes: 0
+    prunedDuplicateNodes: 0,
+    visibleCanonicalNodes: 0,
+    isolatedCanonicalNodes: 0,
+    unmatchedSeedNodes: 0,
+    demotedCandidates: 0
   };
 }
 
 async function seedCanonicalNodes(
   graph: BuiltContextGraph,
-  nodeIndex: Map<string, GraphNode>,
+  registry: MatchRegistry,
   seeds: CanonicalNodeSeed[],
   settings: PersonalContextGraphSettings,
   provider: AIProvider
@@ -179,23 +200,44 @@ async function seedCanonicalNodes(
       seed.label,
       seed.summary,
       seed.aliases,
+      registry,
       graph,
-      nodeIndex,
       settings,
       provider
     );
 
     if (duplicate) {
       mergeSeedIntoNode(duplicate, seed);
-      indexNode(duplicate, nodeIndex);
+      indexNode(duplicate, registry.nodeIndex);
       graph.stats.prunedDuplicateNodes += 1;
       continue;
     }
 
-    graph.nodes.push(node);
-    indexNode(node, nodeIndex);
-    graph.stats.seededNodes += 1;
+    registerNodeForMatching(registry, node, true);
   }
+}
+
+function registerNodeForMatching(registry: MatchRegistry, node: GraphNode, fromSeed: boolean): void {
+  if (!registry.nodes.some((candidate) => candidate.id === node.id)) {
+    registry.nodes.push(node);
+  }
+  if (fromSeed) {
+    registry.seedNodeIds.add(node.id);
+  }
+  indexNode(node, registry.nodeIndex);
+}
+
+function activateNode(
+  graph: BuiltContextGraph,
+  registry: MatchRegistry,
+  node: GraphNode
+): void {
+  if (registry.activeNodeIds.has(node.id)) {
+    return;
+  }
+
+  registry.activeNodeIds.add(node.id);
+  graph.nodes.push(node);
 }
 
 function seedToNode(seed: CanonicalNodeSeed): GraphNode {
@@ -269,8 +311,8 @@ function normalizeLabel(label: string, conversationTitle: string): string {
 
 async function findNodeMatch(
   candidate: Candidate,
+  registry: MatchRegistry,
   graph: BuiltContextGraph,
-  nodeIndex: Map<string, GraphNode>,
   settings: PersonalContextGraphSettings,
   provider: AIProvider
 ): Promise<GraphNode | undefined> {
@@ -279,8 +321,8 @@ async function findNodeMatch(
     candidate.item.label,
     candidate.item.summary,
     [],
+    registry,
     graph,
-    nodeIndex,
     settings,
     provider,
     candidate
@@ -292,14 +334,14 @@ async function findNodeMatchForLabel(
   label: string,
   summary: string,
   aliases: string[],
+  registry: MatchRegistry,
   graph: BuiltContextGraph,
-  nodeIndex: Map<string, GraphNode>,
   settings: PersonalContextGraphSettings,
   provider: AIProvider,
   candidate?: Candidate
 ): Promise<GraphNode | undefined> {
-  for (const key of matchKeys(type, label, aliases)) {
-    const exactNode = nodeIndex.get(key);
+  for (const key of matchKeys(type, label, aliases, summary)) {
+    const exactNode = registry.nodeIndex.get(key);
     if (exactNode) {
       return exactNode;
     }
@@ -309,7 +351,8 @@ async function findNodeMatchForLabel(
     type,
     label,
     summary,
-    graph,
+    matchNodes: registry.nodes,
+    warnings: graph.warnings,
     settings,
     provider,
     candidate
@@ -320,12 +363,13 @@ async function findSemanticMergeCandidate(args: {
   type: ContextNodeType;
   label: string;
   summary: string;
-  graph: BuiltContextGraph;
+  matchNodes: GraphNode[];
+  warnings: string[];
   settings: PersonalContextGraphSettings;
   provider: AIProvider;
   candidate?: Candidate;
 }): Promise<GraphNode | undefined> {
-  const candidates = args.graph.nodes.filter((node) => node.type === args.type);
+  const candidates = args.matchNodes.filter((node) => node.type === args.type);
   if (candidates.length === 0) {
     return undefined;
   }
@@ -339,7 +383,7 @@ async function findSemanticMergeCandidate(args: {
       args.candidate.embedding = itemEmbedding;
     }
   } catch (error) {
-    args.graph.warnings.push(
+    args.warnings.push(
       `Semantic merge skipped for "${args.label}": ${
         error instanceof Error ? error.message : String(error)
       }`
@@ -368,7 +412,7 @@ async function findSemanticMergeCandidate(args: {
   if (
     bestNode &&
     bestSimilarity >= args.settings.semanticMergeThreshold &&
-    passesSemanticGuard(args.label, bestNode.label, bestSimilarity, args.settings)
+    passesSemanticGuard(args.type, args.label, bestNode.label, bestSimilarity, args.settings)
   ) {
     return bestNode;
   }
@@ -412,9 +456,15 @@ async function findClusterMatch(
   provider: AIProvider,
   warnings: string[]
 ): Promise<CandidateCluster | undefined> {
-  const exactSlug = slugify(candidate.item.label);
+  const candidateKeys = new Set(
+    matchKeys(candidate.type, candidate.item.label, [], candidate.item.summary)
+  );
   const exactCluster = clusters.find(
-    (cluster) => cluster.type === candidate.type && slugify(cluster.label) === exactSlug
+    (cluster) =>
+      cluster.type === candidate.type &&
+      matchKeys(cluster.type, cluster.label, [], cluster.summary).some((key) =>
+        candidateKeys.has(key)
+      )
   );
   if (exactCluster) {
     return exactCluster;
@@ -455,7 +505,7 @@ async function findClusterMatch(
   if (
     bestCluster &&
     bestSimilarity >= settings.semanticMergeThreshold &&
-    passesSemanticGuard(candidate.item.label, bestCluster.label, bestSimilarity, settings)
+    passesSemanticGuard(candidate.type, candidate.item.label, bestCluster.label, bestSimilarity, settings)
   ) {
     return bestCluster;
   }
@@ -472,10 +522,29 @@ function shouldPromoteCluster(
     ...cluster.candidates.map((candidate) => candidate.item.confidence)
   );
 
-  return (
-    sourceCount >= settings.minimumCanonicalSources ||
-    maxConfidence >= settings.singleSourcePromotionThreshold
-  );
+  if (sourceCount >= settings.minimumCanonicalSources) {
+    return true;
+  }
+
+  if (maxConfidence < settings.singleSourcePromotionThreshold) {
+    return false;
+  }
+
+  if (cluster.type === "entity" || cluster.type === "artifact") {
+    return isNamedStableLabel(cluster.label);
+  }
+
+  if (cluster.type === "project") {
+    return maxConfidence >= settings.singleSourcePromotionThreshold + 0.03 &&
+      isDurableProjectLabel(cluster);
+  }
+
+  if (cluster.type === "topic") {
+    return maxConfidence >= settings.singleSourcePromotionThreshold + 0.03 &&
+      isDurableTopicLabel(cluster.label);
+  }
+
+  return false;
 }
 
 function chooseRepresentative(candidates: Candidate[]): Candidate {
@@ -629,6 +698,7 @@ function addSparseProjectLinks(
   graph: BuiltContextGraph,
   settings: PersonalContextGraphSettings
 ): void {
+  const totalProjectLinkCap = Math.max(4, settings.maxProjectLinksPerType * 3);
   for (const linksByType of Object.values(graph.sourceLinksById)) {
     const projects = linksByType.project || [];
     if (projects.length === 0) {
@@ -636,15 +706,120 @@ function addSparseProjectLinks(
     }
 
     for (const project of projects) {
-      for (const type of PROJECT_LINK_TYPES) {
-        const linkedNodes = (linksByType[type] || [])
+      const selected: Array<{ type: ContextNodeType; node: GraphNode }> = [];
+      const selectedByType = new Map<ContextNodeType, number>();
+      const candidates = PROJECT_LINK_TYPES.flatMap((type) =>
+        (linksByType[type] || [])
           .filter((node) => node.id !== project.id)
-          .sort(compareLinkedNodes)
-          .slice(0, settings.maxProjectLinksPerType);
+          .map((node) => ({ type, node }))
+      ).sort((left, right) => compareLinkedNodes(left.node, right.node));
+
+      for (const candidate of candidates) {
+        if (selected.length >= totalProjectLinkCap) {
+          break;
+        }
+
+        const countForType = selectedByType.get(candidate.type) || 0;
+        if (countForType >= settings.maxProjectLinksPerType) {
+          continue;
+        }
+
+        selected.push(candidate);
+        selectedByType.set(candidate.type, countForType + 1);
+      }
+
+      for (const type of PROJECT_LINK_TYPES) {
+        const linkedNodes = selected
+          .filter((entry) => entry.type === type)
+          .map((entry) => entry.node);
         appendNodeLinks(graph, project.id, type, linkedNodes, settings.maxProjectLinksPerType);
       }
     }
   }
+}
+
+function applyGraphHygiene(graph: BuiltContextGraph, registry: MatchRegistry): number {
+  const degrees = computeCanonicalDegrees(graph);
+  const isolatedIds = new Set(
+    graph.nodes
+      .filter((node) => (degrees.get(node.id) || 0) === 0)
+      .map((node) => node.id)
+  );
+
+  if (isolatedIds.size === 0) {
+    return 0;
+  }
+
+  graph.nodes = graph.nodes.filter((node) => !isolatedIds.has(node.id));
+  for (const id of isolatedIds) {
+    registry.activeNodeIds.delete(id);
+  }
+
+  for (const linksByType of Object.values(graph.sourceLinksById)) {
+    for (const type of CONTEXT_NODE_TYPES) {
+      const links = linksByType[type] || [];
+      linksByType[type] = links.filter((node) => !isolatedIds.has(node.id));
+    }
+  }
+
+  for (const [nodeId, linksByType] of Object.entries(graph.nodeLinksById)) {
+    if (isolatedIds.has(nodeId)) {
+      delete graph.nodeLinksById[nodeId];
+      continue;
+    }
+
+    for (const type of CONTEXT_NODE_TYPES) {
+      const links = linksByType[type] || [];
+      linksByType[type] = links.filter((node) => !isolatedIds.has(node.id));
+    }
+  }
+
+  return isolatedIds.size;
+}
+
+function finalizeGraphStats(graph: BuiltContextGraph, registry: MatchRegistry): void {
+  const visibleSeedNodes = graph.nodes.filter((node) => registry.seedNodeIds.has(node.id)).length;
+  graph.stats.seededNodes = visibleSeedNodes;
+  graph.stats.unmatchedSeedNodes = Math.max(0, registry.seedNodeIds.size - visibleSeedNodes);
+  graph.stats.visibleCanonicalNodes = graph.nodes.length;
+  graph.stats.isolatedCanonicalNodes = countIsolatedCanonicalNodes(graph);
+}
+
+function countIsolatedCanonicalNodes(graph: BuiltContextGraph): number {
+  const degrees = computeCanonicalDegrees(graph);
+  return graph.nodes.filter((node) => (degrees.get(node.id) || 0) === 0).length;
+}
+
+function computeCanonicalDegrees(graph: BuiltContextGraph): Map<string, number> {
+  const degrees = new Map<string, number>();
+  for (const node of graph.nodes) {
+    degrees.set(node.id, 0);
+  }
+
+  const bump = (nodeId: string): void => {
+    if (degrees.has(nodeId)) {
+      degrees.set(nodeId, (degrees.get(nodeId) || 0) + 1);
+    }
+  };
+
+  for (const linksByType of Object.values(graph.sourceLinksById)) {
+    for (const nodes of Object.values(linksByType)) {
+      for (const node of nodes || []) {
+        bump(node.id);
+      }
+    }
+  }
+
+  for (const [nodeId, linksByType] of Object.entries(graph.nodeLinksById)) {
+    for (const nodes of Object.values(linksByType)) {
+      for (const node of nodes || []) {
+        bump(nodeId);
+        bump(node.id);
+      }
+    }
+  }
+
+  return degrees;
 }
 
 function appendNodeLinks(
@@ -696,21 +871,65 @@ function buildEdge(sourceId: string, node: GraphNode): GraphEdge {
 }
 
 function indexNode(node: GraphNode, nodeIndex: Map<string, GraphNode>): void {
-  for (const key of matchKeys(node.type, node.label, node.aliases)) {
+  for (const key of matchKeys(node.type, node.label, node.aliases, node.summary)) {
     nodeIndex.set(key, node);
   }
 }
 
-function matchKeys(type: ContextNodeType, label: string, aliases: string[]): string[] {
-  return uniqueStrings([label, ...aliases].map((value) => `${type}:${slugify(value)}`));
+function matchKeys(
+  type: ContextNodeType,
+  label: string,
+  aliases: string[],
+  summary = ""
+): string[] {
+  const values = [label, ...aliases].filter(Boolean);
+  const keys = values.flatMap((value) => {
+    const slug = slugify(value);
+    const normalizedSlug = normalizedLabelSlug(value);
+    return uniqueStrings([
+      `${type}:${slug}`,
+      normalizedSlug && normalizedSlug !== slug ? `${type}:normalized:${normalizedSlug}` : ""
+    ]);
+  });
+
+  if (type === "project") {
+    for (const value of [...values, summary]) {
+      const familyKey = projectFamilyKey(value);
+      if (familyKey) {
+        keys.push(`${type}:project-family:${familyKey}`);
+      }
+
+      const normalizedProjectSlug = normalizedProjectLabelSlug(value);
+      if (normalizedProjectSlug) {
+        keys.push(`${type}:project-normalized:${normalizedProjectSlug}`);
+      }
+    }
+  }
+
+  return uniqueStrings(keys);
 }
 
 function passesSemanticGuard(
+  type: ContextNodeType,
   leftLabel: string,
   rightLabel: string,
   similarity: number,
   settings: PersonalContextGraphSettings
 ): boolean {
+  if (type === "project") {
+    const leftFamily = projectFamilyKey(leftLabel);
+    const rightFamily = projectFamilyKey(rightLabel);
+    if (leftFamily && leftFamily === rightFamily) {
+      return true;
+    }
+
+    if (similarity < settings.semanticMergeThreshold + 0.08) {
+      const leftTokens = significantTokens(leftLabel);
+      const rightTokens = significantTokens(rightLabel);
+      return leftTokens.filter((token) => rightTokens.includes(token)).length >= 2;
+    }
+  }
+
   if (similarity >= settings.semanticMergeThreshold + 0.05) {
     return true;
   }
@@ -722,6 +941,9 @@ function passesSemanticGuard(
 
 function significantTokens(label: string): string[] {
   const stopWords = new Set([
+    "and",
+    "the",
+    "for",
     "with",
     "from",
     "into",
@@ -732,12 +954,147 @@ function significantTokens(label: string): string[] {
     "based",
     "system",
     "project",
-    "logic"
+    "logic",
+    "feature",
+    "app"
   ]);
 
-  return slugify(label)
+  return uniqueStrings(slugify(label)
     .split("-")
-    .filter((token) => token.length >= 3 && !stopWords.has(token));
+    .map(normalizeToken)
+    .filter((token) => (token.length >= 3 || /^\d+$/.test(token)) && !stopWords.has(token)));
+}
+
+function normalizedLabelSlug(label: string): string {
+  return significantTokens(label).join("-");
+}
+
+function normalizedProjectLabelSlug(label: string): string {
+  const projectStopWords = new Set([
+    "project",
+    "system",
+    "pipeline",
+    "feature",
+    "app",
+    "overhaul",
+    "improvement",
+    "integration",
+    "implementation",
+    "workflow"
+  ]);
+
+  return significantTokens(label)
+    .filter((token) => !projectStopWords.has(token))
+    .slice(0, 5)
+    .join("-");
+}
+
+function projectFamilyKey(label: string): string | undefined {
+  const tokens = significantTokens(label);
+  const hasAny = (...values: string[]) => values.some((value) => tokens.includes(value));
+  const hasAll = (...values: string[]) => values.every((value) => tokens.includes(value));
+
+  if (hasAny("family", "iphone", "phone", "carrier", "verizon", "mobile", "tmobile")) {
+    return "family-phone-plan";
+  }
+
+  if (hasAny("duolingo") || (hasAny("learning") && hasAny("startup", "tech", "stack"))) {
+    return "duolingo-ai-learning-app";
+  }
+
+  if (hasAny("job", "displacement") && hasAny("role", "tech", "estimate", "career")) {
+    return "ai-job-displacement";
+  }
+
+  if (
+    hasAny("neck", "posture", "slouch", "backwaist", "angle") &&
+    hasAny("score", "calibration", "metric", "base", "posture")
+  ) {
+    return "posture-scoring-system";
+  }
+
+  if (
+    hasAny("bodyscanner", "scann", "scannai", "scan", "physique", "fitness", "workout") &&
+    hasAny("evaluation", "benchmark", "openai", "gpt", "workout", "fitness", "scan", "body")
+  ) {
+    return "fitness-scan-ai-system";
+  }
+
+  if (hasAll("maintain", "weight") && hasAny("benchmark", "logic", "goal")) {
+    return "maintain-weight-benchmarking";
+  }
+
+  return undefined;
+}
+
+function normalizeToken(token: string): string {
+  if (token === "scoring" || token === "scores") {
+    return "score";
+  }
+  if (token === "features") {
+    return "feature";
+  }
+  if (token === "benchmarks") {
+    return "benchmark";
+  }
+  if (token === "weights") {
+    return "weight";
+  }
+  if (token === "tmobile") {
+    return "mobile";
+  }
+  if (token.endsWith("ies") && token.length > 4) {
+    return `${token.slice(0, -3)}y`;
+  }
+  if (token.endsWith("s") && token.length > 4 && !token.endsWith("ss")) {
+    return token.slice(0, -1);
+  }
+  return token;
+}
+
+function isNamedStableLabel(label: string): boolean {
+  const tokens = significantTokens(label);
+  if (tokens.length === 0 || label.length > 90) {
+    return false;
+  }
+
+  if (/\.[a-z0-9]{1,8}$/i.test(label) || /\b[A-Z]{2,}\b/.test(label) || /[a-z][A-Z]/.test(label)) {
+    return true;
+  }
+
+  if (/\d/.test(label) || /^[A-Z]/.test(label.trim())) {
+    return !isNarrowActionLabel(label);
+  }
+
+  return tokens.length >= 3 && !isNarrowActionLabel(label);
+}
+
+function isDurableProjectLabel(cluster: CandidateCluster): boolean {
+  const combinedText = [
+    cluster.label,
+    cluster.summary,
+    ...cluster.candidates.map((candidate) => candidate.item.summary)
+  ].join(" ");
+
+  if (projectFamilyKey(combinedText)) {
+    return true;
+  }
+
+  const tokens = significantTokens(combinedText);
+  return tokens.length >= 3 &&
+    !isNarrowActionLabel(cluster.label) &&
+    tokens.some((token) =>
+      ["product", "platform", "workflow", "backend", "frontend", "database", "automation"].includes(token)
+    );
+}
+
+function isDurableTopicLabel(label: string): boolean {
+  const tokens = significantTokens(label);
+  return tokens.length >= 3 && label.length <= 80 && !isNarrowActionLabel(label);
+}
+
+function isNarrowActionLabel(label: string): boolean {
+  return /^(add|adjust|ask|build|check|choose|compute|create|define|design|derive|determine|evaluate|explain|fetch|generate|implement|incorporate|map|move|prioritize|provide|refine|remove|replace|request|save|store|tailor|update|upload|use)\b/i.test(label.trim());
 }
 
 function labelNoiseScore(label: string): number {

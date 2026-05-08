@@ -1,7 +1,7 @@
 {
   "id": "personal-context-graph",
   "name": "Personal Context Graph",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.5.0",
   "description": "Import ChatGPT exports into a typed personal context graph for future agents.",
   "author": "Dhruv",

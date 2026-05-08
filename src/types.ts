@@ -157,6 +157,10 @@ export interface GraphBuildStats {
   newlyPromotedNodes: number;
   sourceOnlyCandidates: number;
   prunedDuplicateNodes: number;
+  visibleCanonicalNodes: number;
+  isolatedCanonicalNodes: number;
+  unmatchedSeedNodes: number;
+  demotedCandidates: number;
 }
 
 export interface CanonicalNodeSeed {
@@ -197,6 +201,10 @@ export interface GraphBuildReport {
   newlyPromotedNodeCount: number;
   sourceOnlyCandidateCount: number;
   prunedDuplicateNodeCount: number;
+  visibleCanonicalNodeCount: number;
+  isolatedCanonicalNodeCount: number;
+  unmatchedSeedNodeCount: number;
+  demotedCandidateCount: number;
   agentContextPath: string;
   startedAt: string;
   completedAt: string;
