@@ -47,6 +47,9 @@ const PROJECT_LINK_TYPES: ContextNodeType[] = [
   "style_pattern"
 ];
 
+const SOURCE_ANCHOR_TYPES: ContextNodeType[] = ["entity", "topic", "artifact"];
+const SOURCE_ANCHOR_MIN_CONFIDENCE = 0.7;
+
 interface Candidate {
   type: ContextNodeType;
   item: ExtractedContextItem;
@@ -111,6 +114,7 @@ export async function buildContextGraph(
   await seedCanonicalNodes(graph, registry, seeds, settings, provider);
 
   const unmatchedCandidates: Candidate[] = [];
+  const sourceAnchorCandidatesBySource = new Map<string, Candidate[]>();
   const processCandidate = async (
     candidate: Candidate,
     options: { allowUnmatched: boolean; includeAlias: boolean; includeSummary: boolean }
@@ -141,6 +145,9 @@ export async function buildContextGraph(
     const sourcePath = buildSourcePath(input.conversation.title, input.conversation.sourceId, settings);
     graph.sourcePathsById[input.conversation.sourceId] = sourcePath;
     graph.sourceLinksById[input.conversation.sourceId] = {};
+    const sourceAnchors = collectSourceAnchorCandidates(input, sourcePath);
+    sourceAnchorCandidatesBySource.set(input.conversation.sourceId, sourceAnchors.candidates);
+    graph.stats.anchorCandidatesRejected += sourceAnchors.rejected;
 
     for (const type of CONTEXT_NODE_TYPES) {
       const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
@@ -234,6 +241,13 @@ export async function buildContextGraph(
     }
   }
 
+  await applySourceAnchorFallback(
+    graph,
+    registry,
+    sourceAnchorCandidatesBySource,
+    settings,
+    provider
+  );
   graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
   addSparseProjectLinks(graph, settings);
   graph.stats.demotedCandidates += applyGraphHygiene(graph, registry);
@@ -257,7 +271,10 @@ function createStats(): GraphBuildStats {
     demotedCandidates: 0,
     rejectedProjectCandidates: 0,
     projectEvidenceCandidates: 0,
-    filteredSeedAliases: 0
+    filteredSeedAliases: 0,
+    sourceAnchorFallbacks: 0,
+    underlinkedSources: 0,
+    anchorCandidatesRejected: 0
   };
 }
 
@@ -661,6 +678,137 @@ function shouldPromoteCluster(
   return false;
 }
 
+function collectSourceAnchorCandidates(
+  input: ConversationExtraction,
+  sourcePath: string
+): { candidates: Candidate[]; rejected: number } {
+  const candidates: Candidate[] = [];
+  let rejected = 0;
+
+  for (const type of SOURCE_ANCHOR_TYPES) {
+    const items = prioritizeItems(
+      type,
+      input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[]
+    ).map((item) => normalizeItemForGraph(item, input));
+
+    for (const item of items) {
+      const candidate: Candidate = {
+        type,
+        item,
+        input,
+        sourcePath,
+        sourceId: input.conversation.sourceId
+      };
+
+      if (isEligibleSourceAnchorCandidate(candidate)) {
+        candidates.push(candidate);
+      } else {
+        rejected += 1;
+      }
+    }
+  }
+
+  return {
+    candidates: uniqueBy(candidates, (candidate) => `${candidate.type}:${slugify(candidate.item.label)}`),
+    rejected
+  };
+}
+
+function isEligibleSourceAnchorCandidate(candidate: Candidate): boolean {
+  return candidate.item.confidence >= SOURCE_ANCHOR_MIN_CONFIDENCE &&
+    candidate.item.evidence.length > 0 &&
+    candidate.item.label.trim().length > 0 &&
+    isNamedSourceAnchorLabel(candidate.type, candidate.item.label);
+}
+
+async function applySourceAnchorFallback(
+  graph: BuiltContextGraph,
+  registry: MatchRegistry,
+  sourceAnchorCandidatesBySource: Map<string, Candidate[]>,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  for (const [sourceId, candidates] of sourceAnchorCandidatesBySource.entries()) {
+    if (countSourceLinks(graph.sourceLinksById[sourceId] || {}) > 0) {
+      continue;
+    }
+
+    graph.stats.underlinkedSources += 1;
+    const candidate = chooseSourceAnchorCandidate(candidates);
+    if (!candidate) {
+      continue;
+    }
+
+    const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
+    if (existingNode) {
+      activateNode(graph, registry, existingNode);
+      mergeCandidateIntoNode(existingNode, candidate);
+      indexNode(existingNode, registry.nodeIndex);
+      addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
+      graph.stats.mergedCandidates += 1;
+      graph.stats.sourceAnchorFallbacks += 1;
+      continue;
+    }
+
+    const node = createNode(
+      candidate.type,
+      candidate.item,
+      settings.outputFolder,
+      slugify(candidate.item.label)
+    );
+    registerNodeForMatching(registry, node, false);
+    activateNode(graph, registry, node);
+    mergeCandidateIntoNode(node, candidate);
+    indexNode(node, registry.nodeIndex);
+    addSourceLink(graph, candidate.sourceId, candidate.type, node);
+    graph.stats.newlyPromotedNodes += 1;
+    graph.stats.sourceAnchorFallbacks += 1;
+  }
+}
+
+function chooseSourceAnchorCandidate(candidates: Candidate[]): Candidate | undefined {
+  return [...candidates].sort((left, right) => {
+    const typeDelta = sourceAnchorTypePriority(left.type) - sourceAnchorTypePriority(right.type);
+    if (typeDelta !== 0) {
+      return typeDelta;
+    }
+
+    const confidenceDelta = right.item.confidence - left.item.confidence;
+    if (confidenceDelta !== 0) {
+      return confidenceDelta;
+    }
+
+    const evidenceDelta = right.item.evidence.length - left.item.evidence.length;
+    if (evidenceDelta !== 0) {
+      return evidenceDelta;
+    }
+
+    const nameStrengthDelta =
+      sourceAnchorNameStrength(right.item.label) - sourceAnchorNameStrength(left.item.label);
+    if (nameStrengthDelta !== 0) {
+      return nameStrengthDelta;
+    }
+
+    return labelNoiseScore(left.item.label) - labelNoiseScore(right.item.label);
+  })[0];
+}
+
+function sourceAnchorTypePriority(type: ContextNodeType): number {
+  if (type === "entity") {
+    return 0;
+  }
+  if (type === "topic") {
+    return 1;
+  }
+  return 2;
+}
+
+function countSourceLinks(
+  linksByType: Partial<Record<ContextNodeType, GraphNode[]>>
+): number {
+  return Object.values(linksByType).reduce((sum, links) => sum + (links?.length || 0), 0);
+}
+
 function classifyProjectCandidate(candidate: Candidate): ProjectCandidateClassification {
   const text = projectCandidateText(
     candidate.item.summary,
@@ -1030,7 +1178,10 @@ function matchKeys(
     const normalizedSlug = normalizedLabelSlug(value);
     return uniqueStrings([
       `${type}:${slug}`,
-      normalizedSlug && normalizedSlug !== slug ? `${type}:normalized:${normalizedSlug}` : ""
+      normalizedSlug && normalizedSlug !== slug ? `${type}:normalized:${normalizedSlug}` : "",
+      type !== "project" && normalizedAppProductLabelSlug(value)
+        ? `${type}:app-product:${normalizedAppProductLabelSlug(value)}`
+        : ""
     ]);
   });
 
@@ -1066,6 +1217,12 @@ function passesSemanticGuard(
   }
 
   if (similarity >= settings.semanticMergeThreshold + 0.05) {
+    return true;
+  }
+
+  const leftAppProductSlug = normalizedAppProductLabelSlug(leftLabel);
+  const rightAppProductSlug = normalizedAppProductLabelSlug(rightLabel);
+  if (leftAppProductSlug && leftAppProductSlug === rightAppProductSlug) {
     return true;
   }
 
@@ -1122,6 +1279,27 @@ function normalizedProjectLabelSlug(label: string): string {
     .filter((token) => !projectStopWords.has(token))
     .slice(0, 5)
     .join("-");
+}
+
+function normalizedAppProductLabelSlug(label: string): string {
+  const tokens = slugify(label)
+    .split("-")
+    .map(normalizeToken)
+    .filter(Boolean);
+  const hasAny = (...values: string[]) => values.some((value) => tokens.includes(value));
+  const hasLearningAppSignal =
+    hasAny("ailingo") ||
+    hasAny("duolingo") ||
+    (hasAny("learning") && hasAny("app", "product", "platform", "design"));
+  if (hasLearningAppSignal) {
+    return "ai-learning-app";
+  }
+
+  if (hasAny("scann", "scannai", "bodyscanner")) {
+    return "scann";
+  }
+
+  return "";
 }
 
 function projectDomainKey(text: string): ProjectDomainKey | undefined {
@@ -1345,6 +1523,39 @@ function isNamedStableLabel(label: string): boolean {
   }
 
   return tokens.length >= 3 && !isNarrowActionLabel(label);
+}
+
+function isNamedSourceAnchorLabel(type: ContextNodeType, label: string): boolean {
+  if (!isNamedStableLabel(label) || isNarrowActionLabel(label)) {
+    return false;
+  }
+
+  if (type === "entity") {
+    return sourceAnchorNameStrength(label) >= 1;
+  }
+
+  return sourceAnchorNameStrength(label) >= 1 &&
+    !/\b(note|topic|discussion|context|question)\b/i.test(label);
+}
+
+function sourceAnchorNameStrength(label: string): number {
+  let score = 0;
+  if (/\.[a-z0-9]{1,8}$/i.test(label) || /[a-z][A-Z]/.test(label)) {
+    score += 3;
+  }
+  if (/\b[A-Z]{2,}\b/.test(label)) {
+    score += 2;
+  }
+  if (/\bThe\s+[A-Z][a-z]+\b/.test(label)) {
+    score += 2;
+  }
+  if (/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b/.test(label)) {
+    score += 1;
+  }
+  if (/\d/.test(label)) {
+    score += 1;
+  }
+  return score;
 }
 
 function isDurableProjectLabel(cluster: CandidateCluster): boolean {

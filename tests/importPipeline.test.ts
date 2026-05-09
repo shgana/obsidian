@@ -59,6 +59,27 @@ describe("import pipeline", () => {
     expect("conversations" in artifacts.checkpoint).toBe(false);
   });
 
+  it("renders source anchor fallback links while retaining source-only context", async () => {
+    const artifacts = await runImport(
+      [conversation("conv-residency", "Greetings exchange", "Are you familiar with The Residency?")],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph"
+      },
+      residencyProvider
+    );
+
+    const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
+
+    expect(artifacts.report.sourceAnchorFallbackCount).toBe(1);
+    expect(sourceDraft?.content).toContain("pcg_entities:");
+    expect(sourceDraft?.content).toContain("  - \"entity_the-residency\"");
+    expect(sourceDraft?.content).toContain("[[Context Graph/Entities/The Residency|The Residency]]");
+    expect(sourceDraft?.content).toContain("Chalice Chat AI interview");
+  });
+
   it("enforces cost caps before provider extraction", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,
@@ -108,6 +129,55 @@ const mockProvider: AIProvider = {
       artifacts: [],
       stylePatterns: [],
       extractedAt: "2026-05-06T00:00:00.000Z"
+    };
+  },
+  async embedText(): Promise<number[]> {
+    return [1, 0, 0];
+  }
+};
+
+const residencyProvider: AIProvider = {
+  async extractContext(conversation): Promise<ExtractedContext> {
+    return {
+      sourceId: conversation.sourceId,
+      conversationTitle: conversation.title,
+      summary: "The user asked about The Residency and preparation for its AI interview process.",
+      confidence: 0.68,
+      topics: [
+        {
+          label: "Chalice Chat AI interview",
+          summary: "The user wanted tips for a Chalice Chat AI interview.",
+          confidence: 0.71,
+          evidence: [
+            {
+              quote: "can you search tips on the Chalice Chat from the residency",
+              turnRole: "user",
+              confidence: 0.71
+            }
+          ]
+        }
+      ],
+      entities: [
+        {
+          label: "The Residency",
+          summary: "A startup incubator program discussed by the user.",
+          confidence: 0.76,
+          evidence: [
+            {
+              quote: "the startup incubator program called the Residency",
+              turnRole: "user",
+              confidence: 0.76
+            }
+          ]
+        }
+      ],
+      projects: [],
+      preferences: [],
+      decisions: [],
+      tasks: [],
+      artifacts: [],
+      stylePatterns: [],
+      extractedAt: "2026-05-09T00:00:00.000Z"
     };
   },
   async embedText(): Promise<number[]> {

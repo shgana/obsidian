@@ -164,6 +164,9 @@ export interface GraphBuildStats {
   rejectedProjectCandidates: number;
   projectEvidenceCandidates: number;
   filteredSeedAliases: number;
+  sourceAnchorFallbacks: number;
+  underlinkedSources: number;
+  anchorCandidatesRejected: number;
 }
 
 export interface CanonicalNodeSeed {
@@ -216,6 +219,9 @@ export interface GraphBuildReport {
   rejectedProjectCandidateCount: number;
   projectEvidenceCandidateCount: number;
   filteredSeedAliasCount: number;
+  sourceAnchorFallbackCount: number;
+  underlinkedSourceCount: number;
+  anchorCandidateRejectedCount: number;
   agentContextPath: string;
   startedAt: string;
   completedAt: string;

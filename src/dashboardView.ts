@@ -104,6 +104,15 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Filtered seed aliases: ${report.filteredSeedAliasCount ?? 0}`
   });
   list.createEl("li", {
+    text: `Source anchor fallbacks: ${report.sourceAnchorFallbackCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Underlinked sources: ${report.underlinkedSourceCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Rejected anchor candidates: ${report.anchorCandidateRejectedCount ?? 0}`
+  });
+  list.createEl("li", {
     text: `Pruned duplicate nodes: ${report.prunedDuplicateNodeCount ?? 0}`
   });
   list.createEl("li", {

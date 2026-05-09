@@ -9,6 +9,7 @@ import type {
 import type { PersonalContextGraphSettings } from "../settings";
 import { conversationToPrompt } from "../conversationText";
 import { nowIso } from "../text";
+import { EXTRACTION_SYSTEM_PROMPT } from "./prompts";
 
 interface OpenAITextContent {
   type?: string;
@@ -146,15 +147,6 @@ function formatOpenAiError(
 
   return body.error?.message || `OpenAI ${phase} failed (${status}).`;
 }
-
-const EXTRACTION_SYSTEM_PROMPT = [
-  "You extract conservative, evidence-backed personal context from a single ChatGPT conversation.",
-  "Return only facts strongly supported by this conversation.",
-  "Prefer durable user context over generic topic labels.",
-  "Do not invent identities, preferences, decisions, projects, tasks, or style patterns.",
-  "Every extracted item must include a short evidence quote from the conversation.",
-  "Use confidence below 0.72 for weak or speculative items."
-].join(" ");
 
 const evidenceSchema = {
   type: "object",

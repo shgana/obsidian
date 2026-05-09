@@ -60,6 +60,95 @@ describe("context graph builder", () => {
     expect(graph.nodes).toHaveLength(0);
   });
 
+  it("adds one source anchor fallback for an otherwise unlinked named entity", async () => {
+    const input = extractionInput("conv-residency", "Greetings exchange", "small talk", 0.4);
+    input.extraction.topics = [];
+    input.extraction.entities = [
+      graphItem(
+        "The Residency",
+        "A startup incubator program discussed by the user.",
+        0.76
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const entities = graph.nodes.filter((node) => node.type === "entity");
+
+    expect(entities).toHaveLength(1);
+    expect(entities[0].label).toBe("The Residency");
+    expect(graph.sourceLinksById["conv-residency"].entity?.[0].label).toBe("The Residency");
+    expect(graph.stats.sourceAnchorFallbacks).toBe(1);
+    expect(graph.stats.underlinkedSources).toBe(1);
+  });
+
+  it("does not add source anchor fallback for weak or unnamed context", async () => {
+    const input = extractionInput("conv-weak-anchor", "Weak anchor", "small talk", 0.4);
+    input.extraction.topics = [];
+    input.extraction.entities = [
+      graphItem(
+        "application process",
+        "A generic application-process reference without a stable named anchor.",
+        0.76
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes).toHaveLength(0);
+    expect(graph.sourceLinksById["conv-weak-anchor"].entity || []).toHaveLength(0);
+    expect(graph.stats.sourceAnchorFallbacks).toBe(0);
+    expect(graph.stats.underlinkedSources).toBe(1);
+  });
+
+  it("does not add source anchor fallback when a source already has a canonical link", async () => {
+    const input = extractionInput("conv-linked-anchor", "Linked anchor", "small talk", 0.4);
+    input.extraction.topics = [];
+    input.extraction.entities = [
+      graphItem(
+        "OpenAIService.swift",
+        "A stable Swift source file referenced in the conversation.",
+        0.99
+      ),
+      graphItem(
+        "The Residency",
+        "A startup incubator program discussed by the user.",
+        0.76
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const entityLabels = graph.nodes.filter((node) => node.type === "entity").map((node) => node.label);
+
+    expect(entityLabels).toEqual(["OpenAIService.swift"]);
+    expect(graph.stats.sourceAnchorFallbacks).toBe(0);
+    expect(graph.stats.underlinkedSources).toBe(0);
+  });
+
+  it("does not use projects or tasks as source anchor fallbacks", async () => {
+    const input = extractionInput("conv-task-anchor", "Task anchor", "small talk", 0.4);
+    input.extraction.topics = [];
+    input.extraction.projects = [
+      graphItem(
+        "The Residency prep project",
+        "Prepare for The Residency interview process.",
+        0.96
+      )
+    ];
+    input.extraction.tasks = [
+      graphItem(
+        "Research The Residency prep tips",
+        "Research preparation tips for The Residency.",
+        0.96
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes).toHaveLength(0);
+    expect(graph.stats.sourceAnchorFallbacks).toBe(0);
+    expect(graph.stats.underlinkedSources).toBe(1);
+  });
+
   it("removes chunk markers from canonical labels", async () => {
     const graph = await buildContextGraph(
       [extractionInput("conv-chunk", "AI Scan Accuracy Improvement", "AI Scan Accuracy Improvement (chunk 2)", 0.99)],
@@ -221,6 +310,40 @@ describe("context graph builder", () => {
     expect(projectLabels).toContain("AI scan evaluation improvement project");
     expect(projectLabels).toContain("BodyScanner fitness AI feature");
     expect(graph.sourceLinksById["conv-project-variants"].project).toHaveLength(1);
+  });
+
+  it("merges app and product label variants with lightweight app-product normalization", async () => {
+    const input = extractionInput("conv-app-product", "AI learning app notes", "placeholder", 0.4);
+    input.extraction.topics = [
+      graphItem(
+        "AiLingo AI-learning app",
+        "A product concept for an AI learning app.",
+        0.99
+      )
+    ];
+    const secondInput = extractionInput(
+      "conv-app-product-2",
+      "AI learning app product notes",
+      "placeholder",
+      0.4
+    );
+    secondInput.extraction.topics = [
+      graphItem(
+        "AI learning app product design",
+        "Product design work for the AI learning app.",
+        0.98
+      )
+    ];
+
+    const graph = await buildContextGraph([input, secondInput], DEFAULT_SETTINGS, provider);
+    const topics = graph.nodes.filter((node) => node.type === "topic");
+    const labels = [topics[0]?.label, ...(topics[0]?.aliases || [])];
+
+    expect(topics).toHaveLength(1);
+    expect(labels).toContain("AiLingo AI-learning app");
+    expect(labels).toContain("AI learning app product design");
+    expect(graph.sourceLinksById["conv-app-product"].topic).toHaveLength(1);
+    expect(graph.sourceLinksById["conv-app-product-2"].topic).toHaveLength(1);
   });
 
   it("does not match non-project phone-plan candidates to stale Duolingo seed aliases", async () => {
