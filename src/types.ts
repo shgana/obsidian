@@ -186,6 +186,11 @@ export interface ImportPreview {
   selectedConversations: number;
   totalTurns: number;
   estimatedTokens: number;
+  estimatedExtractionInputTokens: number;
+  estimatedExtractionOutputTokens: number;
+  estimatedEmbeddingTokens: number;
+  estimatedExtractionCostUsd: number;
+  estimatedEmbeddingCostUsd: number;
   estimatedCostUsd: number;
 }
 
@@ -215,6 +220,11 @@ export interface GraphBuildReport {
   startedAt: string;
   completedAt: string;
   estimatedTokens: number;
+  estimatedExtractionInputTokens: number;
+  estimatedExtractionOutputTokens: number;
+  estimatedEmbeddingTokens: number;
+  estimatedExtractionCostUsd: number;
+  estimatedEmbeddingCostUsd: number;
   estimatedCostUsd: number;
   warnings: string[];
 }

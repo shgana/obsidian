@@ -1,8 +1,31 @@
-import { runImport } from "../src/importPipeline";
+import { createImportPreview, runImport } from "../src/importPipeline";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import type { AIProvider, ExtractedContext, ParsedConversation } from "../src/types";
 
 describe("import pipeline", () => {
+  it("estimates API cost with model-aware input, output, and embedding charges", () => {
+    const preview = createImportPreview(
+      "test.zip",
+      [conversation("conv-cost", "Cost test", "x".repeat(4000))],
+      {
+        ...DEFAULT_SETTINGS,
+        extractionModel: "gpt-5.4",
+        embeddingModel: "text-embedding-3-large"
+      }
+    );
+
+    expect(preview.estimatedTokens).toBeGreaterThanOrEqual(1000);
+    expect(preview.estimatedExtractionInputTokens).toBeGreaterThan(preview.estimatedTokens);
+    expect(preview.estimatedExtractionOutputTokens).toBeGreaterThan(0);
+    expect(preview.estimatedEmbeddingTokens).toBeGreaterThan(0);
+    expect(preview.estimatedExtractionCostUsd).toBeGreaterThan(0);
+    expect(preview.estimatedEmbeddingCostUsd).toBeGreaterThan(0);
+    expect(preview.estimatedCostUsd).toBeCloseTo(
+      preview.estimatedExtractionCostUsd + preview.estimatedEmbeddingCostUsd,
+      8
+    );
+  });
+
   it("renders source notes, typed nodes, and agent context drafts", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,

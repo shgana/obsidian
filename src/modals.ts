@@ -67,12 +67,26 @@ export class ImportConsentModal extends Modal {
       text: `Turns: ${this.preview.totalTurns}`
     });
     list.createEl("li", {
-      text: `Estimated input tokens: ${this.preview.estimatedTokens.toLocaleString()}`
+      text: `Transcript tokens: ${this.preview.estimatedTokens.toLocaleString()}`
     });
     list.createEl("li", {
-      text: `Approximate extraction cost: $${this.preview.estimatedCostUsd.toFixed(
+      text: `Estimated extraction input tokens: ${this.preview.estimatedExtractionInputTokens.toLocaleString()}`
+    });
+    list.createEl("li", {
+      text: `Estimated extraction output tokens: ${this.preview.estimatedExtractionOutputTokens.toLocaleString()}`
+    });
+    list.createEl("li", {
+      text: `Estimated embedding tokens: ${this.preview.estimatedEmbeddingTokens.toLocaleString()}`
+    });
+    list.createEl("li", {
+      text: `Approximate total API cost: $${this.preview.estimatedCostUsd.toFixed(
         4
       )} with cap $${this.settings.costCapUsd.toFixed(2)}`
+    });
+    list.createEl("li", {
+      text: `Extraction: $${this.preview.estimatedExtractionCostUsd.toFixed(
+        4
+      )}; embeddings: $${this.preview.estimatedEmbeddingCostUsd.toFixed(4)}`
     });
 
     if (this.settings.costCapUsd > 0 && this.preview.estimatedCostUsd > this.settings.costCapUsd) {

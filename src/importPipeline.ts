@@ -34,6 +34,36 @@ export interface ImportArtifacts {
   report: GraphBuildReport;
 }
 
+interface CostEstimate {
+  extractionInputTokens: number;
+  extractionOutputTokens: number;
+  embeddingTokens: number;
+  extractionCostUsd: number;
+  embeddingCostUsd: number;
+  totalCostUsd: number;
+}
+
+interface TokenPrice {
+  inputUsdPer1M: number;
+  outputUsdPer1M: number;
+}
+
+const EXTRACTION_MODEL_PRICES: Record<string, TokenPrice> = {
+  "gpt-5.4-nano": { inputUsdPer1M: 0.2, outputUsdPer1M: 1.25 },
+  "gpt-5.4-mini": { inputUsdPer1M: 0.75, outputUsdPer1M: 4.5 },
+  "gpt-5.4": { inputUsdPer1M: 2.5, outputUsdPer1M: 15 },
+  "gpt-5.5": { inputUsdPer1M: 5, outputUsdPer1M: 30 }
+};
+
+const EMBEDDING_MODEL_PRICES_USD_PER_1M: Record<string, number> = {
+  "text-embedding-3-small": 0.02,
+  "text-embedding-3-large": 0.13
+};
+
+const EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION = 1800;
+const STRUCTURED_OUTPUT_TOKEN_RATIO = 0.25;
+const EMBEDDING_TOKEN_RATIO = 0.35;
+
 export function createImportPreview(
   fileName: string,
   conversations: ParsedConversation[],
@@ -42,6 +72,11 @@ export function createImportPreview(
   const selectedConversations = selectConversations(conversations, settings);
   const transcriptText = selectedConversations.map(conversationToTranscript).join("\n\n");
   const estimatedTokens = estimateTokensFromText(transcriptText);
+  const costEstimate = estimateImportCostUsd(
+    estimatedTokens,
+    selectedConversations.length,
+    settings
+  );
 
   return {
     fileName,
@@ -52,7 +87,12 @@ export function createImportPreview(
       0
     ),
     estimatedTokens,
-    estimatedCostUsd: estimateCostUsd(estimatedTokens, settings)
+    estimatedExtractionInputTokens: costEstimate.extractionInputTokens,
+    estimatedExtractionOutputTokens: costEstimate.extractionOutputTokens,
+    estimatedEmbeddingTokens: costEstimate.embeddingTokens,
+    estimatedExtractionCostUsd: costEstimate.extractionCostUsd,
+    estimatedEmbeddingCostUsd: costEstimate.embeddingCostUsd,
+    estimatedCostUsd: costEstimate.totalCostUsd
   };
 }
 
@@ -71,7 +111,7 @@ export async function runImport(
 
   if (settings.costCapUsd > 0 && preview.estimatedCostUsd > settings.costCapUsd) {
     throw new Error(
-      `Estimated extraction cost $${preview.estimatedCostUsd.toFixed(
+      `Estimated API cost $${preview.estimatedCostUsd.toFixed(
         2
       )} exceeds the configured cap of $${settings.costCapUsd.toFixed(2)}.`
     );
@@ -319,16 +359,58 @@ function createBaseReport(args: {
     startedAt: args.startedAt,
     completedAt: args.completedAt,
     estimatedTokens: args.preview.estimatedTokens,
+    estimatedExtractionInputTokens: args.preview.estimatedExtractionInputTokens,
+    estimatedExtractionOutputTokens: args.preview.estimatedExtractionOutputTokens,
+    estimatedEmbeddingTokens: args.preview.estimatedEmbeddingTokens,
+    estimatedExtractionCostUsd: args.preview.estimatedExtractionCostUsd,
+    estimatedEmbeddingCostUsd: args.preview.estimatedEmbeddingCostUsd,
     estimatedCostUsd: args.preview.estimatedCostUsd,
     warnings: args.graph.warnings
   };
 }
 
-function estimateCostUsd(
+function estimateImportCostUsd(
   estimatedTokens: number,
+  selectedConversationCount: number,
   settings: PersonalContextGraphSettings
-): number {
-  return (estimatedTokens / 1_000_000) * settings.estimatedExtractionCostPer1MInputTokensUsd;
+): CostEstimate {
+  const extractionInputTokens =
+    estimatedTokens +
+    selectedConversationCount * EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION;
+  const extractionOutputTokens = Math.ceil(estimatedTokens * STRUCTURED_OUTPUT_TOKEN_RATIO);
+  const embeddingTokens = Math.ceil(estimatedTokens * EMBEDDING_TOKEN_RATIO);
+  const extractionPrice = extractionModelPrice(settings);
+  const embeddingPrice = embeddingModelPrice(settings.embeddingModel);
+  const extractionCostUsd =
+    (extractionInputTokens / 1_000_000) * extractionPrice.inputUsdPer1M +
+    (extractionOutputTokens / 1_000_000) * extractionPrice.outputUsdPer1M;
+  const embeddingCostUsd = (embeddingTokens / 1_000_000) * embeddingPrice;
+
+  return {
+    extractionInputTokens,
+    extractionOutputTokens,
+    embeddingTokens,
+    extractionCostUsd,
+    embeddingCostUsd,
+    totalCostUsd: extractionCostUsd + embeddingCostUsd
+  };
+}
+
+function extractionModelPrice(settings: PersonalContextGraphSettings): TokenPrice {
+  const model = settings.extractionModel.trim();
+  const knownPrice = EXTRACTION_MODEL_PRICES[model];
+  if (knownPrice) {
+    return knownPrice;
+  }
+
+  return {
+    inputUsdPer1M: settings.estimatedExtractionCostPer1MInputTokensUsd,
+    outputUsdPer1M: settings.estimatedExtractionCostPer1MInputTokensUsd * 6
+  };
+}
+
+function embeddingModelPrice(model: string): number {
+  return EMBEDDING_MODEL_PRICES_USD_PER_1M[model.trim()] || EMBEDDING_MODEL_PRICES_USD_PER_1M["text-embedding-3-large"];
 }
 
 function sanitizeSettingsSnapshot(
