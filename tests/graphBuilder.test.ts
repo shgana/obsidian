@@ -215,10 +215,109 @@ describe("context graph builder", () => {
 
     const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
     const projects = graph.nodes.filter((node) => node.type === "project");
+    const projectLabels = [projects[0]?.label, ...(projects[0]?.aliases || [])];
 
     expect(projects).toHaveLength(1);
-    expect(projects[0].aliases).toContain("AI scan evaluation improvement project");
+    expect(projectLabels).toContain("AI scan evaluation improvement project");
+    expect(projectLabels).toContain("BodyScanner fitness AI feature");
     expect(graph.sourceLinksById["conv-project-variants"].project).toHaveLength(1);
+  });
+
+  it("does not match non-project phone-plan candidates to stale Duolingo seed aliases", async () => {
+    const duolingoSeed = seed("project", "Duolingo-style AI learning app", 0.99, ["old-duo"]);
+    duolingoSeed.summary = "A durable app project for learning AI with Duolingo-style gamification.";
+    duolingoSeed.aliases = ["Choosing a family phone plan", "AI/Duolingo-style app"];
+
+    const input = projectInput("conv-phone", "Family Plan iPhone Deals", [
+      graphItem(
+        "Choosing a family phone plan",
+        "Compare Verizon, T-Mobile, and AT&T carrier family plans with free iPhone offers.",
+        0.99
+      )
+    ]);
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [duolingoSeed]);
+
+    expect(graph.nodes.filter((node) => node.type === "project")).toHaveLength(0);
+    expect(graph.sourceLinksById["conv-phone"].project || []).toHaveLength(0);
+    expect(graph.stats.rejectedProjectCandidates).toBe(1);
+    expect(graph.stats.filteredSeedAliases).toBe(1);
+  });
+
+  it("rebuilds activated project seed metadata from current compatible evidence", async () => {
+    const duolingoSeed = seed("project", "Duolingo-style AI learning app", 0.99, ["old-phone"]);
+    duolingoSeed.summary = "A durable app project for learning AI with Duolingo-style gamification.";
+    duolingoSeed.aliases = ["Choosing a family phone plan", "AI/Duolingo-style app"];
+    duolingoSeed.evidence = [
+      {
+        sourceId: "old-phone",
+        sourceTitle: "Family Plan iPhone Deals",
+        sourcePath: "Context Graph/Sources/ChatGPT/Family Plan iPhone Deals.md",
+        quote: "family plans that give me a free iPhone per line",
+        confidence: 0.98
+      }
+    ];
+
+    const input = projectInput("conv-duo", "Tech Stack for AI App", [
+      graphItem(
+        "AI/Duolingo-style app",
+        "Build a Duolingo-style app for learning AI concepts with gamification.",
+        0.99
+      )
+    ]);
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [duolingoSeed]);
+    const project = graph.nodes.find((node) => node.type === "project");
+
+    expect(project?.label).toBe("Duolingo-style AI learning app");
+    expect(project?.aliases).toContain("AI/Duolingo-style app");
+    expect(project?.aliases).not.toContain("Choosing a family phone plan");
+    expect(project?.sourceIds).toEqual(["conv-duo"]);
+    expect(project?.evidence.map((entry) => entry.sourceId)).toEqual(["conv-duo"]);
+  });
+
+  it("attaches project-domain evidence to an existing durable project without alias promotion", async () => {
+    const scannSeed = seed("project", "AI scan evaluation improvement project", 0.99, ["old-scann"]);
+    scannSeed.summary = "A durable Scann project for scan evaluation, benchmarking, and workout generation.";
+
+    const input = projectInput("conv-deck", "Funding Breakdown & Pitch Deck", [
+      graphItem(
+        "Funding breakdown & pitch deck for Scann",
+        "Create pitch deck sections and funding ask for the Scann fitness scan product.",
+        0.97
+      )
+    ]);
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [scannSeed]);
+    const project = graph.nodes.find((node) => node.type === "project");
+
+    expect(project?.label).toBe("AI scan evaluation improvement project");
+    expect(project?.aliases).not.toContain("Funding breakdown & pitch deck for Scann");
+    expect(project?.sourceIds).toEqual(["conv-deck"]);
+    expect(graph.sourceLinksById["conv-deck"].project?.[0].label).toBe("AI scan evaluation improvement project");
+    expect(graph.stats.projectEvidenceCandidates).toBe(1);
+  });
+
+  it("treats UX project labels as evidence for the durable AI learning app instead of separate projects", async () => {
+    const duolingoSeed = seed("project", "Duolingo-style AI learning app", 0.99, ["old-duo"]);
+    duolingoSeed.summary = "A durable app project for learning AI with Duolingo-style gamification.";
+
+    const input = projectInput("conv-ux", "Duolingo Product Success Analysis", [
+      graphItem(
+        "AI learning app UX design",
+        "Analyze Duolingo onboarding and UX flow for the AI learning app.",
+        0.99
+      )
+    ]);
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [duolingoSeed]);
+    const projects = graph.nodes.filter((node) => node.type === "project");
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0].label).toBe("Duolingo-style AI learning app");
+    expect(projects[0].aliases).not.toContain("AI learning app UX design");
+    expect(graph.sourceLinksById["conv-ux"].project?.[0].label).toBe("Duolingo-style AI learning app");
+    expect(graph.stats.projectEvidenceCandidates).toBe(1);
   });
 
   it("caps visible source links per type", async () => {
@@ -267,7 +366,7 @@ function seed(
     label,
     slug: label.toLowerCase().replace(/\s+/g, "-"),
     aliases: [],
-    path: `Context Graph/Topics/${label}.md`,
+    path: `Context Graph/${type === "project" ? "Projects" : "Topics"}/${label}.md`,
     summary: `${label} summary.`,
     confidence,
     evidence: sourceIds.map((sourceId) => ({
@@ -279,6 +378,17 @@ function seed(
     })),
     sourceIds
   };
+}
+
+function projectInput(
+  sourceId: string,
+  title: string,
+  projects: ExtractedContext["projects"]
+): ConversationExtraction {
+  const input = extractionInput(sourceId, title, "placeholder", 0.9);
+  input.extraction.topics = [];
+  input.extraction.projects = projects;
+  return input;
 }
 
 function extractionInput(

@@ -24,8 +24,8 @@ export interface PersonalContextGraphSettings {
 export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   openAiApiKey: "",
   rememberOpenAiApiKey: false,
-  extractionModel: "gpt-5.4-mini",
-  embeddingModel: "text-embedding-3-small",
+  extractionModel: "gpt-5.4",
+  embeddingModel: "text-embedding-3-large",
   outputFolder: "Context Graph",
   maxConversations: 0,
   costCapUsd: 5,

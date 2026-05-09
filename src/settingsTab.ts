@@ -50,7 +50,7 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
       .setDesc("Hosted model used for structured context extraction.")
       .addText((text) =>
         text.setValue(this.host.settings.extractionModel).onChange(async (value) => {
-          this.host.settings.extractionModel = value.trim() || "gpt-5.4-mini";
+          this.host.settings.extractionModel = value.trim() || "gpt-5.4";
           await this.host.saveSettings();
         })
       );
@@ -60,7 +60,7 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
       .setDesc("Used for conservative same-type semantic merging.")
       .addText((text) =>
         text.setValue(this.host.settings.embeddingModel).onChange(async (value) => {
-          this.host.settings.embeddingModel = value.trim() || "text-embedding-3-small";
+          this.host.settings.embeddingModel = value.trim() || "text-embedding-3-large";
           await this.host.saveSettings();
         })
       );

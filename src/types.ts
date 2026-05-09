@@ -161,6 +161,9 @@ export interface GraphBuildStats {
   isolatedCanonicalNodes: number;
   unmatchedSeedNodes: number;
   demotedCandidates: number;
+  rejectedProjectCandidates: number;
+  projectEvidenceCandidates: number;
+  filteredSeedAliases: number;
 }
 
 export interface CanonicalNodeSeed {
@@ -205,6 +208,9 @@ export interface GraphBuildReport {
   isolatedCanonicalNodeCount: number;
   unmatchedSeedNodeCount: number;
   demotedCandidateCount: number;
+  rejectedProjectCandidateCount: number;
+  projectEvidenceCandidateCount: number;
+  filteredSeedAliasCount: number;
   agentContextPath: string;
   startedAt: string;
   completedAt: string;

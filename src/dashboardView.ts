@@ -95,6 +95,15 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Demoted candidates: ${report.demotedCandidateCount ?? 0}`
   });
   list.createEl("li", {
+    text: `Rejected project candidates: ${report.rejectedProjectCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Project evidence candidates: ${report.projectEvidenceCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Filtered seed aliases: ${report.filteredSeedAliasCount ?? 0}`
+  });
+  list.createEl("li", {
     text: `Pruned duplicate nodes: ${report.prunedDuplicateNodeCount ?? 0}`
   });
   list.createEl("li", {

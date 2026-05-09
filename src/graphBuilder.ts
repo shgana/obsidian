@@ -54,6 +54,7 @@ interface Candidate {
   sourcePath: string;
   sourceId: string;
   embedding?: number[];
+  projectClassification?: ProjectCandidateClassification;
 }
 
 interface CandidateCluster {
@@ -69,6 +70,20 @@ interface MatchRegistry {
   nodeIndex: Map<string, GraphNode>;
   seedNodeIds: Set<string>;
   activeNodeIds: Set<string>;
+}
+
+type ProjectCandidateKind = "durable_project" | "domain_evidence" | "non_project";
+type ProjectDomainKey = string;
+
+const NON_PROJECT_DOMAINS = new Set<ProjectDomainKey>([
+  "phone-plan",
+  "school-assignment",
+  "ai-job-research"
+]);
+
+interface ProjectCandidateClassification {
+  kind: ProjectCandidateKind;
+  domain?: ProjectDomainKey;
 }
 
 export async function buildContextGraph(
@@ -96,6 +111,32 @@ export async function buildContextGraph(
   await seedCanonicalNodes(graph, registry, seeds, settings, provider);
 
   const unmatchedCandidates: Candidate[] = [];
+  const processCandidate = async (
+    candidate: Candidate,
+    options: { allowUnmatched: boolean; includeAlias: boolean; includeSummary: boolean }
+  ): Promise<void> => {
+    const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
+    if (existingNode) {
+      activateNode(graph, registry, existingNode);
+      mergeCandidateIntoNode(existingNode, candidate, {
+        includeAlias: options.includeAlias,
+        includeSummary: options.includeSummary
+      });
+      indexNode(existingNode, registry.nodeIndex);
+      addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
+      graph.stats.mergedCandidates += 1;
+      return;
+    }
+
+    if (options.allowUnmatched) {
+      unmatchedCandidates.push(candidate);
+      return;
+    }
+
+    graph.stats.sourceOnlyCandidates += 1;
+    graph.stats.demotedCandidates += 1;
+  };
+
   for (const input of inputs) {
     const sourcePath = buildSourcePath(input.conversation.title, input.conversation.sourceId, settings);
     graph.sourcePathsById[input.conversation.sourceId] = sourcePath;
@@ -114,17 +155,49 @@ export async function buildContextGraph(
           sourceId: input.conversation.sourceId
         }));
 
-      for (const candidate of candidates) {
-        const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
-        if (existingNode) {
-          activateNode(graph, registry, existingNode);
-          mergeCandidateIntoNode(existingNode, candidate);
-          indexNode(existingNode, registry.nodeIndex);
-          addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
-          graph.stats.mergedCandidates += 1;
-        } else {
-          unmatchedCandidates.push(candidate);
+      if (type === "project") {
+        const projectCandidates = candidates.map((candidate) => ({
+          ...candidate,
+          projectClassification: classifyProjectCandidate(candidate)
+        }));
+
+        for (const candidate of projectCandidates.filter(
+          (entry) => entry.projectClassification?.kind === "durable_project"
+        )) {
+          await processCandidate(candidate, {
+            allowUnmatched: true,
+            includeAlias: true,
+            includeSummary: true
+          });
         }
+
+        for (const candidate of projectCandidates.filter(
+          (entry) => entry.projectClassification?.kind === "domain_evidence"
+        )) {
+          graph.stats.projectEvidenceCandidates += 1;
+          await processCandidate(candidate, {
+            allowUnmatched: false,
+            includeAlias: false,
+            includeSummary: false
+          });
+        }
+
+        for (const candidate of projectCandidates.filter(
+          (entry) => entry.projectClassification?.kind === "non_project"
+        )) {
+          graph.stats.rejectedProjectCandidates += 1;
+          graph.stats.sourceOnlyCandidates += 1;
+          graph.stats.demotedCandidates += 1;
+        }
+        continue;
+      }
+
+      for (const candidate of candidates) {
+        await processCandidate(candidate, {
+          allowUnmatched: true,
+          includeAlias: true,
+          includeSummary: true
+        });
       }
     }
   }
@@ -181,7 +254,10 @@ function createStats(): GraphBuildStats {
     visibleCanonicalNodes: 0,
     isolatedCanonicalNodes: 0,
     unmatchedSeedNodes: 0,
-    demotedCandidates: 0
+    demotedCandidates: 0,
+    rejectedProjectCandidates: 0,
+    projectEvidenceCandidates: 0,
+    filteredSeedAliases: 0
   };
 }
 
@@ -194,12 +270,18 @@ async function seedCanonicalNodes(
 ): Promise<void> {
   const orderedSeeds = [...seeds].sort(compareSeedSurvivorPriority);
   for (const seed of orderedSeeds) {
-    const node = seedToNode(seed);
+    const seedResult = seedToNode(seed);
+    graph.stats.filteredSeedAliases += seedResult.filteredAliasCount;
+    if (!seedResult.node) {
+      continue;
+    }
+
+    const node = seedResult.node;
     const duplicate = await findNodeMatchForLabel(
-      seed.type,
-      seed.label,
-      seed.summary,
-      seed.aliases,
+      node.type,
+      node.label,
+      node.summary,
+      node.aliases,
       registry,
       graph,
       settings,
@@ -240,19 +322,30 @@ function activateNode(
   graph.nodes.push(node);
 }
 
-function seedToNode(seed: CanonicalNodeSeed): GraphNode {
+function seedToNode(seed: CanonicalNodeSeed): { node?: GraphNode; filteredAliasCount: number } {
+  const aliases = seed.type === "project" ? filterProjectSeedAliases(seed) : uniqueStrings(seed.aliases || []);
+  if (seed.type === "project" && !isDurableProjectSeed(seed)) {
+    return {
+      filteredAliasCount: seed.aliases.length
+    };
+  }
+
+  const resetProjectEvidence = seed.type === "project";
   return {
-    id: seed.id,
-    type: seed.type,
-    label: seed.label,
-    slug: seed.slug || slugify(seed.label),
-    aliases: uniqueStrings(seed.aliases || []),
-    path: seed.path,
-    summary: seed.summary,
-    confidence: seed.confidence,
-    evidence: [...seed.evidence],
-    sourceIds: uniqueStrings(seed.sourceIds || []),
-    lastSeen: seed.lastSeen
+    filteredAliasCount: seed.aliases.length - aliases.length,
+    node: {
+      id: seed.id,
+      type: seed.type,
+      label: seed.label,
+      slug: seed.slug || slugify(seed.label),
+      aliases,
+      path: seed.path,
+      summary: seed.summary,
+      confidence: seed.confidence,
+      evidence: resetProjectEvidence ? [] : [...seed.evidence],
+      sourceIds: resetProjectEvidence ? [] : uniqueStrings(seed.sourceIds || []),
+      lastSeen: seed.lastSeen
+    }
   };
 }
 
@@ -343,7 +436,12 @@ async function findNodeMatchForLabel(
   for (const key of matchKeys(type, label, aliases, summary)) {
     const exactNode = registry.nodeIndex.get(key);
     if (exactNode) {
-      return exactNode;
+      if (
+        type !== "project" ||
+        isProjectMatchAllowed(label, summary, exactNode.label, exactNode.summary)
+      ) {
+        return exactNode;
+      }
     }
   }
 
@@ -412,7 +510,15 @@ async function findSemanticMergeCandidate(args: {
   if (
     bestNode &&
     bestSimilarity >= args.settings.semanticMergeThreshold &&
-    passesSemanticGuard(args.type, args.label, bestNode.label, bestSimilarity, args.settings)
+    passesSemanticGuard(
+      args.type,
+      args.label,
+      bestNode.label,
+      bestSimilarity,
+      args.settings,
+      args.summary,
+      bestNode.summary
+    )
   ) {
     return bestNode;
   }
@@ -505,7 +611,15 @@ async function findClusterMatch(
   if (
     bestCluster &&
     bestSimilarity >= settings.semanticMergeThreshold &&
-    passesSemanticGuard(candidate.type, candidate.item.label, bestCluster.label, bestSimilarity, settings)
+    passesSemanticGuard(
+      candidate.type,
+      candidate.item.label,
+      bestCluster.label,
+      bestSimilarity,
+      settings,
+      candidate.item.summary,
+      bestCluster.summary
+    )
   ) {
     return bestCluster;
   }
@@ -547,6 +661,15 @@ function shouldPromoteCluster(
   return false;
 }
 
+function classifyProjectCandidate(candidate: Candidate): ProjectCandidateClassification {
+  const text = projectCandidateText(
+    candidate.item.summary,
+    candidate.input.conversation.title,
+    ...candidate.item.evidence.map((entry) => entry.quote)
+  );
+  return classifyProjectText(candidate.item.label, text);
+}
+
 function chooseRepresentative(candidates: Candidate[]): Candidate {
   return [...candidates].sort((left, right) => {
     const confidenceDelta = right.item.confidence - left.item.confidence;
@@ -584,16 +707,26 @@ function createNode(
   };
 }
 
-function mergeCandidateIntoNode(node: GraphNode, candidate: Candidate): void {
+function mergeCandidateIntoNode(
+  node: GraphNode,
+  candidate: Candidate,
+  options: { includeAlias?: boolean; includeSummary?: boolean } = {}
+): void {
+  const includeAlias = options.includeAlias ?? true;
+  const includeSummary = options.includeSummary ?? true;
   node.confidence = Math.max(node.confidence, candidate.item.confidence);
-  node.summary = mergeSummary(node.summary, candidate.item.summary);
+  if (includeSummary) {
+    node.summary = mergeSummary(node.summary, candidate.item.summary);
+  }
   node.lastSeen =
     candidate.input.conversation.updateTime ||
     candidate.input.conversation.createTime ||
     candidate.input.extraction.extractedAt ||
     node.lastSeen;
   node.sourceIds = uniqueStrings([...node.sourceIds, candidate.sourceId]);
-  addAlias(node, candidate.item.label);
+  if (includeAlias) {
+    addAlias(node, candidate.item.label);
+  }
 
   const evidence = candidate.item.evidence.map<NodeEvidence>((entry) => ({
     sourceId: candidate.sourceId,
@@ -612,6 +745,15 @@ function mergeCandidateIntoNode(node: GraphNode, candidate: Candidate): void {
 }
 
 function mergeSeedIntoNode(node: GraphNode, seed: CanonicalNodeSeed): void {
+  if (node.type === "project") {
+    for (const alias of filterProjectSeedAliases(seed, node)) {
+      addAlias(node, alias);
+    }
+    node.confidence = Math.max(node.confidence, seed.confidence);
+    node.lastSeen = maxStringDate(node.lastSeen, seed.lastSeen);
+    return;
+  }
+
   node.confidence = Math.max(node.confidence, seed.confidence);
   node.summary = mergeSummary(node.summary, seed.summary);
   node.lastSeen = maxStringDate(node.lastSeen, seed.lastSeen);
@@ -893,10 +1035,11 @@ function matchKeys(
   });
 
   if (type === "project") {
-    for (const value of [...values, summary]) {
-      const familyKey = projectFamilyKey(value);
-      if (familyKey) {
-        keys.push(`${type}:project-family:${familyKey}`);
+    void summary;
+    for (const value of values) {
+      const domainKey = durableProjectDomainFromParts(value, "");
+      if (domainKey) {
+        keys.push(`${type}:project-domain:${domainKey}`);
       }
 
       const normalizedProjectSlug = normalizedProjectLabelSlug(value);
@@ -914,20 +1057,12 @@ function passesSemanticGuard(
   leftLabel: string,
   rightLabel: string,
   similarity: number,
-  settings: PersonalContextGraphSettings
+  settings: PersonalContextGraphSettings,
+  leftSummary = "",
+  rightSummary = ""
 ): boolean {
   if (type === "project") {
-    const leftFamily = projectFamilyKey(leftLabel);
-    const rightFamily = projectFamilyKey(rightLabel);
-    if (leftFamily && leftFamily === rightFamily) {
-      return true;
-    }
-
-    if (similarity < settings.semanticMergeThreshold + 0.08) {
-      const leftTokens = significantTokens(leftLabel);
-      const rightTokens = significantTokens(rightLabel);
-      return leftTokens.filter((token) => rightTokens.includes(token)).length >= 2;
-    }
+    return isProjectMatchAllowed(leftLabel, leftSummary, rightLabel, rightSummary);
   }
 
   if (similarity >= settings.semanticMergeThreshold + 0.05) {
@@ -989,42 +1124,185 @@ function normalizedProjectLabelSlug(label: string): string {
     .join("-");
 }
 
-function projectFamilyKey(label: string): string | undefined {
-  const tokens = significantTokens(label);
+function projectDomainKey(text: string): ProjectDomainKey | undefined {
+  const tokens = significantTokens(text);
   const hasAny = (...values: string[]) => values.some((value) => tokens.includes(value));
   const hasAll = (...values: string[]) => values.every((value) => tokens.includes(value));
 
   if (hasAny("family", "iphone", "phone", "carrier", "verizon", "mobile", "tmobile")) {
-    return "family-phone-plan";
+    return "phone-plan";
   }
 
   if (hasAny("duolingo") || (hasAny("learning") && hasAny("startup", "tech", "stack"))) {
-    return "duolingo-ai-learning-app";
+    return "ai-learning-app";
   }
 
   if (hasAny("job", "displacement") && hasAny("role", "tech", "estimate", "career")) {
-    return "ai-job-displacement";
+    return "ai-job-research";
+  }
+
+  if (hasAny("assignment", "homework", "class", "course") || hasAll("top", "five")) {
+    return "school-assignment";
   }
 
   if (
     hasAny("neck", "posture", "slouch", "backwaist", "angle") &&
     hasAny("score", "calibration", "metric", "base", "posture")
   ) {
-    return "posture-scoring-system";
+    return "posture-scoring";
   }
 
   if (
     hasAny("bodyscanner", "scann", "scannai", "scan", "physique", "fitness", "workout") &&
     hasAny("evaluation", "benchmark", "openai", "gpt", "workout", "fitness", "scan", "body")
   ) {
-    return "fitness-scan-ai-system";
+    return "scann-fitness";
   }
 
   if (hasAll("maintain", "weight") && hasAny("benchmark", "logic", "goal")) {
-    return "maintain-weight-benchmarking";
+    return "scann-fitness";
   }
 
   return undefined;
+}
+
+function isNonProjectDomain(domain: ProjectDomainKey): boolean {
+  return NON_PROJECT_DOMAINS.has(domain);
+}
+
+function projectCandidateText(...values: string[]): string {
+  return values.filter(Boolean).join(" ");
+}
+
+function isProjectMatchAllowed(
+  leftLabel: string,
+  leftSummary: string,
+  rightLabel: string,
+  rightSummary: string
+): boolean {
+  const leftDomain = durableProjectDomainFromParts(leftLabel, leftSummary);
+  const rightDomain = durableProjectDomainFromParts(rightLabel, rightSummary);
+  return Boolean(leftDomain && rightDomain && leftDomain === rightDomain);
+}
+
+function isDurableProjectSeed(seed: CanonicalNodeSeed): boolean {
+  return classifyProjectText(seed.label, "").kind === "durable_project";
+}
+
+function filterProjectSeedAliases(seed: CanonicalNodeSeed, targetNode?: GraphNode): string[] {
+  const seedDomain = durableProjectDomainFromParts(targetNode?.label || seed.label, "");
+
+  return uniqueStrings(seed.aliases || []).filter((alias) => {
+    const classification = classifyProjectText(alias, "");
+    return classification.kind === "durable_project" &&
+      Boolean(seedDomain && classification.domain === seedDomain);
+  });
+}
+
+function classifyProjectText(label: string, summary: string): ProjectCandidateClassification {
+  const domain = projectDomainFromParts(label, summary);
+  if (!domain || isNonProjectDomain(domain)) {
+    return {
+      kind: "non_project",
+      domain
+    };
+  }
+
+  if (isProjectEvidenceOnlyLabel(label, summary)) {
+    return {
+      kind: "domain_evidence",
+      domain
+    };
+  }
+
+  if (isDurableProjectWorkstreamLabel(label, summary, domain)) {
+    return {
+      kind: "durable_project",
+      domain
+    };
+  }
+
+  return {
+    kind: "domain_evidence",
+    domain
+  };
+}
+
+function projectDomainFromParts(label: string, summary: string): ProjectDomainKey | undefined {
+  const labelDomain = projectDomainKey(label);
+  if (labelDomain) {
+    return labelDomain;
+  }
+
+  if (looksLikeGenericDurableProject(label, summary)) {
+    const genericSlug = normalizedProjectLabelSlug(label) || slugify(label);
+    return genericSlug ? `custom:${genericSlug}` : undefined;
+  }
+
+  return projectDomainKey(summary);
+}
+
+function durableProjectDomainFromParts(label: string, summary: string): ProjectDomainKey | undefined {
+  const domain = projectDomainFromParts(label, summary);
+  return domain && !isNonProjectDomain(domain) ? domain : undefined;
+}
+
+function isProjectEvidenceOnlyLabel(label: string, summary: string): boolean {
+  void summary;
+  const text = label;
+  return /\b(analysis|assignment|breakdown|deck|deliverable|funding|outline|pitch|planning|query|reference|research|resume|slide|slides|stack|ux|writeup)\b/i.test(text);
+}
+
+function looksLikeGenericDurableProject(label: string, summary: string): boolean {
+  const cleanLabel = label.trim();
+  if (
+    !cleanLabel ||
+    cleanLabel.length > 90 ||
+    isNarrowActionLabel(cleanLabel) ||
+    isProjectEvidenceOnlyLabel(cleanLabel, summary)
+  ) {
+    return false;
+  }
+
+  const labelTokens = significantTokens(cleanLabel);
+  if (labelTokens.length < 2) {
+    return false;
+  }
+
+  const text = `${cleanLabel} ${summary}`;
+  return /\b(agent|app|graph|platform|plugin|product|service|system|tool|vault|workflow|workstream)\b/i.test(text);
+}
+
+function isDurableProjectWorkstreamLabel(
+  label: string,
+  summary: string,
+  domain: ProjectDomainKey
+): boolean {
+  const text = `${label} ${summary}`;
+  if (isNarrowActionLabel(label)) {
+    return false;
+  }
+
+  if (domain === "ai-learning-app") {
+    return /\b(app|duolingo|learning|mvp|product)\b/i.test(text) &&
+      !isProjectEvidenceOnlyLabel(label, summary);
+  }
+
+  if (domain === "scann-fitness") {
+    return /\b(app|bodyscanner|evaluation|fitness|pipeline|project|scan|scann|system|workout)\b/i.test(text) &&
+      !isProjectEvidenceOnlyLabel(label, summary);
+  }
+
+  if (domain === "posture-scoring") {
+    return /\b(app|method|posture|score|scoring|system)\b/i.test(text) &&
+      !isProjectEvidenceOnlyLabel(label, summary);
+  }
+
+  if (domain.startsWith("custom:")) {
+    return looksLikeGenericDurableProject(label, summary);
+  }
+
+  return false;
 }
 
 function normalizeToken(token: string): string {
@@ -1076,15 +1354,16 @@ function isDurableProjectLabel(cluster: CandidateCluster): boolean {
     ...cluster.candidates.map((candidate) => candidate.item.summary)
   ].join(" ");
 
-  if (projectFamilyKey(combinedText)) {
-    return true;
+  const domain = durableProjectDomainFromParts(cluster.label, combinedText);
+  if (domain) {
+    return isDurableProjectWorkstreamLabel(cluster.label, combinedText, domain);
   }
 
   const tokens = significantTokens(combinedText);
   return tokens.length >= 3 &&
     !isNarrowActionLabel(cluster.label) &&
     tokens.some((token) =>
-      ["product", "platform", "workflow", "backend", "frontend", "database", "automation"].includes(token)
+      ["agent", "automation", "backend", "database", "frontend", "graph", "platform", "plugin", "product", "vault", "workflow"].includes(token)
     );
 }
 

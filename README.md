@@ -8,6 +8,7 @@ V1 focuses on one high-value path:
 - Use a hosted OpenAI model to extract topics, entities, projects, preferences, decisions, tasks, artifacts, and style patterns.
 - Write conservative, evidence-backed Markdown nodes and wikilinks into a managed `Context Graph` folder.
 - Re-runs seed from prior managed nodes for matching, but only keep canonical nodes supported by the current import evidence.
+- Guard project merges by durable project domains so one-off research, shopping, assignments, and deliverables do not become project nodes.
 - Generate `Context Graph/Agent Context.md` as a compact LLM-ready context pack.
 
 The plugin does not depend on Smart Connections, Dataview, Bases, or Nexus. It writes ordinary Markdown so those tools can still read the output.
