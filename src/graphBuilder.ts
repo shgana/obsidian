@@ -37,16 +37,6 @@ const GRAPH_ITEM_LIMITS: Record<ContextNodeType, number> = {
   style_pattern: 5
 };
 
-const PROJECT_LINK_TYPES: ContextNodeType[] = [
-  "topic",
-  "preference",
-  "decision",
-  "task",
-  "artifact",
-  "entity",
-  "style_pattern"
-];
-
 const SOURCE_ANCHOR_TYPES: ContextNodeType[] = ["entity", "topic", "artifact"];
 const SOURCE_ANCHOR_MIN_CONFIDENCE = 0.7;
 
@@ -249,8 +239,10 @@ export async function buildContextGraph(
     provider
   );
   graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
-  addSparseProjectLinks(graph, settings);
+  addCoOccurrenceLinks(graph, settings);
+  await addSemanticSimilarityLinks(graph, settings, provider);
   graph.stats.demotedCandidates += applyGraphHygiene(graph, registry);
+  await synthesizeNodeSummaries(graph, settings, provider);
   rebuildEvidenceEdges(graph);
   finalizeGraphStats(graph, registry);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
@@ -984,46 +976,152 @@ function rebuildEvidenceEdges(graph: BuiltContextGraph): void {
   }
 }
 
-function addSparseProjectLinks(
+function addCoOccurrenceLinks(
   graph: BuiltContextGraph,
   settings: PersonalContextGraphSettings
 ): void {
-  const totalProjectLinkCap = Math.max(4, settings.maxProjectLinksPerType * 3);
+  const cap = Math.max(1, settings.maxCoOccurrenceLinksPerType);
   for (const linksByType of Object.values(graph.sourceLinksById)) {
-    const projects = linksByType.project || [];
-    if (projects.length === 0) {
+    const allNodes: GraphNode[] = [];
+    for (const type of CONTEXT_NODE_TYPES) {
+      for (const node of linksByType[type] || []) {
+        if (!allNodes.some((existing) => existing.id === node.id)) {
+          allNodes.push(node);
+        }
+      }
+    }
+
+    if (allNodes.length < 2) {
       continue;
     }
 
-    for (const project of projects) {
-      const selected: Array<{ type: ContextNodeType; node: GraphNode }> = [];
-      const selectedByType = new Map<ContextNodeType, number>();
-      const candidates = PROJECT_LINK_TYPES.flatMap((type) =>
-        (linksByType[type] || [])
-          .filter((node) => node.id !== project.id)
-          .map((node) => ({ type, node }))
-      ).sort((left, right) => compareLinkedNodes(left.node, right.node));
-
-      for (const candidate of candidates) {
-        if (selected.length >= totalProjectLinkCap) {
-          break;
-        }
-
-        const countForType = selectedByType.get(candidate.type) || 0;
-        if (countForType >= settings.maxProjectLinksPerType) {
+    for (const fromNode of allNodes) {
+      const grouped = new Map<ContextNodeType, GraphNode[]>();
+      for (const otherNode of allNodes) {
+        if (otherNode.id === fromNode.id) {
           continue;
         }
 
-        selected.push(candidate);
-        selectedByType.set(candidate.type, countForType + 1);
+        const list = grouped.get(otherNode.type) || [];
+        list.push(otherNode);
+        grouped.set(otherNode.type, list);
       }
 
-      for (const type of PROJECT_LINK_TYPES) {
-        const linkedNodes = selected
-          .filter((entry) => entry.type === type)
-          .map((entry) => entry.node);
-        appendNodeLinks(graph, project.id, type, linkedNodes, settings.maxProjectLinksPerType);
+      for (const [type, nodes] of grouped.entries()) {
+        const ranked = [...nodes].sort(compareLinkedNodes).slice(0, cap);
+        appendNodeLinks(graph, fromNode.id, type, ranked, cap);
       }
+    }
+  }
+}
+
+async function synthesizeNodeSummaries(
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  if (!settings.synthesizeNodeSummaries) {
+    return;
+  }
+
+  const minEvidence = Math.max(1, settings.synthesizeNodeSummaryMinEvidence);
+
+  for (const node of graph.nodes) {
+    if (node.evidence.length < minEvidence) {
+      continue;
+    }
+
+    const quotes = uniqueStrings(
+      node.evidence
+        .slice()
+        .sort((left, right) => right.confidence - left.confidence)
+        .map((entry) => entry.quote.trim())
+        .filter(Boolean)
+    ).slice(0, 12);
+
+    if (quotes.length === 0) {
+      continue;
+    }
+
+    try {
+      const synthesized = await provider.synthesizeSummary({
+        type: node.type,
+        label: node.label,
+        evidenceQuotes: quotes
+      });
+
+      const cleaned = synthesized.replace(/\s+/g, " ").trim();
+      if (cleaned) {
+        node.summary = cleaned.slice(0, 600);
+      }
+    } catch (error) {
+      graph.warnings.push(
+        `Summary synthesis skipped for "${node.label}": ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+}
+
+async function addSemanticSimilarityLinks(
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  if (graph.nodes.length < 2) {
+    return;
+  }
+
+  const threshold = settings.similarityLinkThreshold;
+  const cap = Math.max(1, settings.maxSimilarityLinksPerType);
+
+  const embedded: GraphNode[] = [];
+  for (const node of graph.nodes) {
+    if (!node.embedding) {
+      try {
+        node.embedding = await provider.embedText(`${node.label}\n${node.summary}`);
+      } catch (error) {
+        graph.warnings.push(
+          `Similarity link skipped for "${node.label}": ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        continue;
+      }
+    }
+    if (node.embedding && node.embedding.length > 0) {
+      embedded.push(node);
+    }
+  }
+
+  for (const node of embedded) {
+    const scored: Array<{ other: GraphNode; similarity: number }> = [];
+    for (const other of embedded) {
+      if (other.id === node.id) {
+        continue;
+      }
+
+      const similarity = cosineSimilarity(node.embedding!, other.embedding!);
+      if (similarity >= threshold) {
+        scored.push({ other, similarity });
+      }
+    }
+
+    scored.sort((left, right) => right.similarity - left.similarity);
+
+    const grouped = new Map<ContextNodeType, GraphNode[]>();
+    for (const entry of scored) {
+      const list = grouped.get(entry.other.type) || [];
+      if (list.length >= cap) {
+        continue;
+      }
+      list.push(entry.other);
+      grouped.set(entry.other.type, list);
+    }
+
+    for (const [type, links] of grouped.entries()) {
+      appendNodeLinks(graph, node.id, type, links, cap);
     }
   }
 }

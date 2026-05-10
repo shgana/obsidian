@@ -18,6 +18,9 @@ const provider: AIProvider = {
     }
 
     return [0, 1, 0];
+  },
+  async synthesizeSummary(): Promise<string> {
+    return "";
   }
 };
 
@@ -201,6 +204,140 @@ describe("context graph builder", () => {
     expect(project).toBeDefined();
     expect(graph.nodeLinksById[project!.id].task?.[0].label).toBe("Import ChatGPT data");
     expect(graph.edges.every((edge) => edge.edgeType === "evidence_for")).toBe(true);
+  });
+
+  it("adds symmetric reverse links from co-occurring tasks back to their project", async () => {
+    const input = extractionInput("conv-symmetric", "Symmetric note", "Obsidian", 0.95);
+    input.extraction.projects = [
+      {
+        label: "Personal context graph",
+        summary: "A project to build a context graph.",
+        confidence: 0.95,
+        evidence: [
+          { quote: "Build a personal context graph.", turnRole: "user", confidence: 0.95 }
+        ]
+      }
+    ];
+    input.extraction.tasks = [
+      {
+        label: "Import ChatGPT data",
+        summary: "Import ChatGPT data into Obsidian.",
+        confidence: 0.94,
+        evidence: [
+          { quote: "Import ChatGPT data.", turnRole: "user", confidence: 0.94 }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
+
+    const task = graph.nodes.find((node) => node.type === "task");
+    const project = graph.nodes.find((node) => node.type === "project");
+
+    expect(task).toBeDefined();
+    expect(project).toBeDefined();
+    expect(graph.nodeLinksById[task!.id].project?.[0].id).toBe(project!.id);
+    expect(graph.nodeLinksById[task!.id].topic?.[0].label).toBe("Obsidian");
+  });
+
+  it("adds similarity links between semantically close nodes that never co-occurred", async () => {
+    const labelEmbeddings: Record<string, number[]> = {
+      neighborhood: [1, 0.6, 0],
+      "neighbourhood network": [0.4, 1, 0],
+      unrelated: [0, 0, 1]
+    };
+
+    const similarityProvider: AIProvider = {
+      async extractContext(): Promise<ExtractedContext> {
+        throw new Error("not used");
+      },
+      async embedText(text: string): Promise<number[]> {
+        const lower = text.toLowerCase();
+        for (const [needle, vector] of Object.entries(labelEmbeddings)) {
+          if (lower.includes(needle)) {
+            return vector;
+          }
+        }
+        return [0, 1, 0];
+      },
+      async synthesizeSummary(): Promise<string> {
+        return "";
+      }
+    };
+
+    const settings = { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 };
+    const graph = await buildContextGraph(
+      [
+        extractionInput("conv-a", "Conversation A", "neighborhood", 0.95),
+        extractionInput("conv-b", "Conversation B", "neighbourhood network", 0.95),
+        extractionInput("conv-c", "Conversation C", "unrelated", 0.95)
+      ],
+      settings,
+      similarityProvider
+    );
+
+    const neighborhood = graph.nodes.find((node) => node.label === "neighborhood");
+    const network = graph.nodes.find((node) => node.label === "neighbourhood network");
+    const unrelated = graph.nodes.find((node) => node.label === "unrelated");
+
+    expect(neighborhood).toBeDefined();
+    expect(network).toBeDefined();
+    expect(unrelated).toBeDefined();
+
+    const neighborhoodLinks = graph.nodeLinksById[neighborhood!.id]?.topic || [];
+    expect(neighborhoodLinks.some((node) => node.id === network!.id)).toBe(true);
+    expect(neighborhoodLinks.some((node) => node.id === unrelated!.id)).toBe(false);
+  });
+
+  it("calls summary synthesis for nodes with sufficient evidence", async () => {
+    const synthesizedLabels: string[] = [];
+    const synthProvider: AIProvider = {
+      async extractContext(): Promise<ExtractedContext> {
+        throw new Error("not used");
+      },
+      async embedText(): Promise<number[]> {
+        return [1, 0, 0];
+      },
+      async synthesizeSummary(args): Promise<string> {
+        synthesizedLabels.push(args.label);
+        return `Synthesized summary for ${args.label}.`;
+      }
+    };
+
+    const seedItem = {
+      label: "Obsidian",
+      summary: "Initial summary.",
+      confidence: 0.96,
+      evidence: [
+        { quote: "Use Obsidian for memory.", turnRole: "user" as const, confidence: 0.96 }
+      ]
+    };
+
+    const inputA = extractionInput("conv-syn-a", "A", "ignored", 0.96);
+    inputA.extraction.topics = [seedItem];
+    const inputB = extractionInput("conv-syn-b", "B", "ignored", 0.95);
+    inputB.extraction.topics = [
+      { ...seedItem, evidence: [{ quote: "Obsidian is the graph UI.", turnRole: "user", confidence: 0.95 }] }
+    ];
+    const inputC = extractionInput("conv-syn-c", "C", "ignored", 0.94);
+    inputC.extraction.topics = [
+      { ...seedItem, evidence: [{ quote: "Stick with Obsidian.", turnRole: "user", confidence: 0.94 }] }
+    ];
+
+    const graph = await buildContextGraph(
+      [inputA, inputB, inputC],
+      { ...DEFAULT_SETTINGS, synthesizeNodeSummaryMinEvidence: 3 },
+      synthProvider
+    );
+
+    const obsidian = graph.nodes.find((node) => node.label === "Obsidian");
+    expect(obsidian).toBeDefined();
+    expect(synthesizedLabels).toContain("Obsidian");
+    expect(obsidian!.summary).toBe("Synthesized summary for Obsidian.");
   });
 
   it("absorbs medium-confidence items into existing seeded canonical nodes", async () => {

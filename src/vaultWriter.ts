@@ -32,7 +32,17 @@ export class ManagedVaultWriter {
       const existing = this.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         const existingContent = await this.vault.read(existing);
+        if (draft.createOnly) {
+          summary.skipped += 1;
+          continue;
+        }
+
         if (this.settings.overwritePolicy === "skip-existing") {
+          summary.skipped += 1;
+          continue;
+        }
+
+        if (isProtectedContent(existingContent)) {
           summary.skipped += 1;
           continue;
         }
@@ -89,7 +99,7 @@ export class ManagedVaultWriter {
 
     for (const file of files) {
       const content = await this.vault.read(file);
-      if (!isManagedContent(content)) {
+      if (!isManagedContent(content) || isProtectedContent(content)) {
         continue;
       }
 
@@ -109,4 +119,8 @@ function parentPath(path: string): string {
 
 function isManagedContent(content: string): boolean {
   return /^---\n[\s\S]*?\npcg_managed: true\n[\s\S]*?\n---/.test(content);
+}
+
+function isProtectedContent(content: string): boolean {
+  return /^---\n[\s\S]*?\npcg_protected: true\n[\s\S]*?\n---/.test(content);
 }

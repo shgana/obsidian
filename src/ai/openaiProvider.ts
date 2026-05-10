@@ -4,12 +4,14 @@ import type {
   Evidence,
   ExtractedContext,
   ExtractedContextItem,
-  ParsedConversation
+  ParsedConversation,
+  SynthesizeSummaryArgs
 } from "../types";
 import type { PersonalContextGraphSettings } from "../settings";
 import { conversationToPrompt } from "../conversationText";
 import { nowIso } from "../text";
-import { EXTRACTION_SYSTEM_PROMPT } from "./prompts";
+import { CONTEXT_NODE_LABEL } from "../types";
+import { EXTRACTION_SYSTEM_PROMPT, NODE_SYNTHESIS_SYSTEM_PROMPT } from "./prompts";
 
 interface OpenAITextContent {
   type?: string;
@@ -97,6 +99,56 @@ export class OpenAIProvider implements AIProvider {
     }
 
     return normalizeExtractedContext(JSON.parse(outputText), conversation);
+  }
+
+  async synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string> {
+    if (!this.settings.openAiApiKey.trim()) {
+      throw new Error("OpenAI API key is required before synthesizing summaries.");
+    }
+
+    if (args.evidenceQuotes.length === 0) {
+      return "";
+    }
+
+    const userPayload = [
+      `Node type: ${CONTEXT_NODE_LABEL[args.type]}`,
+      `Label: ${args.label}`,
+      "",
+      "Evidence quotes:",
+      ...args.evidenceQuotes
+        .slice(0, 12)
+        .map((quote, index) => `${index + 1}. ${quote.trim()}`)
+    ].join("\n");
+
+    const response = await requestUrl({
+      url: "https://api.openai.com/v1/responses",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+        "Content-Type": "application/json"
+      },
+      throw: false,
+      body: JSON.stringify({
+        model: this.settings.extractionModel,
+        input: [
+          {
+            role: "system",
+            content: [{ type: "input_text", text: NODE_SYNTHESIS_SYSTEM_PROMPT }]
+          },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: userPayload }]
+          }
+        ]
+      })
+    });
+
+    const body = response.json as OpenAIResponseBody;
+    if (response.status >= 400 || body.error) {
+      throw new Error(formatOpenAiError("extraction", response.status, body));
+    }
+
+    return extractOutputText(body).trim();
   }
 
   async embedText(text: string): Promise<number[]> {

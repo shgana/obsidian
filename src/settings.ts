@@ -15,9 +15,15 @@ export interface PersonalContextGraphSettings {
   minimumCanonicalSources: number;
   maxSourceLinksPerType: number;
   maxProjectLinksPerType: number;
+  maxCoOccurrenceLinksPerType: number;
+  maxSimilarityLinksPerType: number;
+  similarityLinkThreshold: number;
   maxPromptChars: number;
   linkAgentContextToGraph: boolean;
   pruneStaleManagedFiles: boolean;
+  synthesizeNodeSummaries: boolean;
+  synthesizeNodeSummaryMinEvidence: number;
+  agentContextSections: boolean;
   estimatedExtractionCostPer1MInputTokensUsd: number;
 }
 
@@ -36,8 +42,14 @@ export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   minimumCanonicalSources: 2,
   maxSourceLinksPerType: 3,
   maxProjectLinksPerType: 3,
+  maxCoOccurrenceLinksPerType: 4,
+  maxSimilarityLinksPerType: 4,
+  similarityLinkThreshold: 0.78,
   maxPromptChars: 36000,
   linkAgentContextToGraph: false,
   pruneStaleManagedFiles: true,
+  synthesizeNodeSummaries: true,
+  synthesizeNodeSummaryMinEvidence: 3,
+  agentContextSections: true,
   estimatedExtractionCostPer1MInputTokensUsd: 0.25
 };

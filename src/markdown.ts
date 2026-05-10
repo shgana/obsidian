@@ -22,6 +22,8 @@ export function createGraphFileDrafts(
 ): FileDraft[] {
   const drafts: FileDraft[] = [];
 
+  drafts.push(buildIdentityDraft(settings));
+
   for (const input of inputs) {
     drafts.push({
       path: graph.sourcePathsById[input.conversation.sourceId],
@@ -44,7 +46,70 @@ export function createGraphFileDrafts(
     managed: true
   });
 
+  if (settings.agentContextSections) {
+    for (const section of buildAgentContextSectionDrafts(inputs, graph, settings)) {
+      drafts.push(section);
+    }
+  }
+
   return drafts;
+}
+
+export function buildIdentityPath(
+  settings: Pick<PersonalContextGraphSettings, "outputFolder">
+): string {
+  return joinVaultPath(settings.outputFolder, "Entities", "_Me.md");
+}
+
+function buildIdentityDraft(
+  settings: Pick<PersonalContextGraphSettings, "outputFolder">
+): FileDraft {
+  const content = [
+    yamlFrontmatter({
+      pcg_type: "identity",
+      pcg_id: "identity_me",
+      pcg_source: "personal-context-graph",
+      pcg_managed: true,
+      pcg_protected: true,
+      pcg_aliases: ["About Me", "Identity", "Me"]
+    }),
+    "# Me",
+    "",
+    "> This is your identity card. The plugin created it on first import and will never overwrite it again as long as `pcg_protected: true` stays in the frontmatter. Edit freely — agents read this first to understand who you are.",
+    "",
+    "## Identity",
+    "- **Name**: ",
+    "- **Role**: ",
+    "- **Location / Timezone**: ",
+    "- **Working hours**: ",
+    "",
+    "## Active Focus (Top 3)",
+    "- ",
+    "- ",
+    "- ",
+    "",
+    "## Working Style & Preferences",
+    "- ",
+    "",
+    "## Key People",
+    "- ",
+    "",
+    "## Communication Preferences",
+    "- ",
+    "",
+    "## Tools & Stack",
+    "- ",
+    "",
+    "## How agents should help me",
+    "- "
+  ].join("\n");
+
+  return {
+    path: buildIdentityPath(settings),
+    content,
+    managed: true,
+    createOnly: true
+  };
 }
 
 export function buildAgentContextPath(
@@ -166,6 +231,249 @@ function renderAgentContext(
       })
       .join("\n")
   ].join("\n");
+}
+
+interface AgentContextSection {
+  type: ContextNodeType | "identity" | "sources";
+  title: string;
+  fileName: string;
+  description: string;
+}
+
+const AGENT_CONTEXT_SECTIONS: AgentContextSection[] = [
+  {
+    type: "identity",
+    title: "Identity",
+    fileName: "00 Identity.md",
+    description: "Pointer to your protected `_Me.md` identity card."
+  },
+  {
+    type: "project",
+    title: "Active Projects",
+    fileName: "01 Active Projects.md",
+    description: "Durable workstreams the user is actively building."
+  },
+  {
+    type: "decision",
+    title: "Decisions",
+    fileName: "02 Decisions.md",
+    description: "Choices the user has made or accepted, ranked by recency."
+  },
+  {
+    type: "preference",
+    title: "Preferences",
+    fileName: "03 Preferences.md",
+    description: "Stable preferences and requirements stated by the user."
+  },
+  {
+    type: "task",
+    title: "Tasks",
+    fileName: "04 Tasks.md",
+    description: "Outstanding asks and follow-ups from the user."
+  },
+  {
+    type: "topic",
+    title: "Recent Topics",
+    fileName: "05 Recent Topics.md",
+    description: "Topics the user has been thinking about, ranked by recency."
+  },
+  {
+    type: "entity",
+    title: "Entities",
+    fileName: "06 Entities.md",
+    description: "Named people, products, organizations, files, and frameworks."
+  },
+  {
+    type: "artifact",
+    title: "Artifacts",
+    fileName: "07 Artifacts.md",
+    description: "Concrete deliverables produced or shared in conversations."
+  },
+  {
+    type: "style_pattern",
+    title: "Style Patterns",
+    fileName: "08 Style Patterns.md",
+    description: "How the user prefers to communicate and work."
+  },
+  {
+    type: "sources",
+    title: "Source Conversations",
+    fileName: "09 Sources.md",
+    description: "Pointers to the underlying source conversations."
+  }
+];
+
+function buildAgentContextSectionDrafts(
+  inputs: ConversationExtraction[],
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+): FileDraft[] {
+  const drafts: FileDraft[] = [];
+  const folder = joinVaultPath(settings.outputFolder, "Agent Context");
+
+  drafts.push({
+    path: joinVaultPath(folder, "README.md"),
+    content: renderAgentContextReadme(settings),
+    managed: true
+  });
+
+  for (const section of AGENT_CONTEXT_SECTIONS) {
+    drafts.push({
+      path: joinVaultPath(folder, section.fileName),
+      content: renderAgentContextSection(section, inputs, graph, settings),
+      managed: true
+    });
+  }
+
+  return drafts;
+}
+
+function renderAgentContextReadme(
+  settings: Pick<PersonalContextGraphSettings, "outputFolder">
+): string {
+  const lines = [
+    yamlFrontmatter({
+      pcg_type: "agent_context_index",
+      pcg_id: "agent_context_index",
+      pcg_source: "personal-context-graph",
+      pcg_managed: true
+    }),
+    "# Agent Context",
+    "",
+    "Sectioned retrieval surface for agents. Read `00 Identity.md` first, then load only the sections you need for the task at hand.",
+    "",
+    "## Sections"
+  ];
+
+  for (const section of AGENT_CONTEXT_SECTIONS) {
+    const sectionPath = joinVaultPath(settings.outputFolder, "Agent Context", section.fileName);
+    lines.push(`- ${wikiLink(sectionPath, section.title)} — ${section.description}`);
+  }
+
+  return lines.join("\n");
+}
+
+function renderAgentContextSection(
+  section: AgentContextSection,
+  inputs: ConversationExtraction[],
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+): string {
+  const lines: string[] = [
+    yamlFrontmatter({
+      pcg_type: `agent_context_section`,
+      pcg_id: `agent_context_${section.title.toLowerCase().replace(/\s+/g, "_")}`,
+      pcg_source: "personal-context-graph",
+      pcg_managed: true
+    }),
+    `# ${section.title}`,
+    "",
+    section.description,
+    ""
+  ];
+
+  if (section.type === "identity") {
+    const identityPath = buildIdentityPath(settings);
+    lines.push(`## Identity Card`);
+    lines.push(`${wikiLink(identityPath, "_Me")} — your protected identity card. Edit there to teach agents who you are.`);
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  if (section.type === "sources") {
+    lines.push("## Conversations");
+    if (inputs.length === 0) {
+      lines.push("None yet.");
+      lines.push("");
+      return lines.join("\n");
+    }
+
+    const sortedInputs = [...inputs].sort((left, right) =>
+      compareDateDesc(latestInputDate(left), latestInputDate(right))
+    );
+
+    for (const input of sortedInputs) {
+      const path = graph.sourcePathsById[input.conversation.sourceId];
+      const label = wikiLink(path, input.conversation.title);
+      const dateMarker = formatDateMarker(latestInputDate(input));
+      lines.push(`- ${label}${dateMarker}: ${input.extraction.summary}`);
+    }
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  const nodes = graph.nodes
+    .filter((node) => node.type === section.type)
+    .sort((left, right) => {
+      const recencyDelta = compareDateDesc(left.lastSeen, right.lastSeen);
+      if (recencyDelta !== 0) {
+        return recencyDelta;
+      }
+
+      const evidenceDelta = right.evidence.length - left.evidence.length;
+      if (evidenceDelta !== 0) {
+        return evidenceDelta;
+      }
+
+      return right.confidence - left.confidence;
+    });
+
+  if (nodes.length === 0) {
+    lines.push("None extracted yet.");
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  for (const node of nodes) {
+    const dateMarker = formatDateMarker(node.lastSeen);
+    lines.push(`### ${wikiLink(node.path, node.label)}${dateMarker}`);
+    if (node.summary) {
+      lines.push(node.summary);
+    }
+    const relatedLinks = graph.nodeLinksById[node.id] || {};
+    const relatedRendered = renderTypedLinks(relatedLinks);
+    if (relatedRendered && !/No high-confidence/.test(relatedRendered)) {
+      lines.push("");
+      lines.push("**Related:**");
+      lines.push(relatedRendered);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function latestInputDate(input: ConversationExtraction): string | undefined {
+  return (
+    input.conversation.updateTime ||
+    input.conversation.createTime ||
+    input.extraction.extractedAt
+  );
+}
+
+function compareDateDesc(left?: string, right?: string): number {
+  if (!left && !right) {
+    return 0;
+  }
+
+  if (!left) {
+    return 1;
+  }
+
+  if (!right) {
+    return -1;
+  }
+
+  return right.localeCompare(left);
+}
+
+function formatDateMarker(value?: string): string {
+  if (!value) {
+    return "";
+  }
+
+  const date = value.slice(0, 10);
+  return ` _(${date})_`;
 }
 
 function renderProfileSummary(inputs: ConversationExtraction[]): string {

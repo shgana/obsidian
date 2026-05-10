@@ -26,6 +26,59 @@ describe("import pipeline", () => {
     );
   });
 
+  it("emits a protected identity stub once and never overwrites it", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-id", "Identity test")],
+      settings,
+      mockProvider
+    );
+
+    const identity = artifacts.drafts.find((draft) => draft.path.endsWith("Entities/_Me.md"));
+    expect(identity).toBeDefined();
+    expect(identity!.createOnly).toBe(true);
+    expect(identity!.content).toContain("pcg_protected: true");
+    expect(identity!.content).toContain("# Me");
+  });
+
+  it("emits sectioned Agent Context files when agentContextSections is enabled", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-sect", "Section test")],
+      settings,
+      mockProvider
+    );
+
+    const readme = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/README.md"
+    );
+    const identitySection = artifacts.drafts.find(
+      (draft) => draft.path.endsWith("Agent Context/00 Identity.md")
+    );
+    const topicsSection = artifacts.drafts.find(
+      (draft) => draft.path.endsWith("Agent Context/05 Recent Topics.md")
+    );
+
+    expect(readme?.content).toContain("Sectioned retrieval surface");
+    expect(identitySection?.content).toContain("[[Context Graph/Entities/_Me|_Me]]");
+    expect(topicsSection?.content).toContain("Obsidian");
+    expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+  });
+
   it("renders source notes, typed nodes, and agent context drafts", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,
@@ -133,6 +186,9 @@ const mockProvider: AIProvider = {
   },
   async embedText(): Promise<number[]> {
     return [1, 0, 0];
+  },
+  async synthesizeSummary(): Promise<string> {
+    return "";
   }
 };
 
@@ -182,6 +238,9 @@ const residencyProvider: AIProvider = {
   },
   async embedText(): Promise<number[]> {
     return [1, 0, 0];
+  },
+  async synthesizeSummary(): Promise<string> {
+    return "";
   }
 };
 

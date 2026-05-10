@@ -251,15 +251,23 @@ export interface SourceManifestEntry {
   updateTime?: string;
 }
 
+export interface SynthesizeSummaryArgs {
+  type: ContextNodeType;
+  label: string;
+  evidenceQuotes: string[];
+}
+
 export interface AIProvider {
   extractContext(conversation: ParsedConversation): Promise<ExtractedContext>;
   embedText(text: string): Promise<number[]>;
+  synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string>;
 }
 
 export interface FileDraft {
   path: string;
   content: string;
   managed: boolean;
+  createOnly?: boolean;
 }
 
 export interface WriteSummary {
