@@ -63,8 +63,13 @@ describe("context graph builder", () => {
     expect(graph.nodes).toHaveLength(0);
   });
 
-  it("adds one source anchor fallback for an otherwise unlinked named entity", async () => {
-    const input = extractionInput("conv-residency", "Greetings exchange", "small talk", 0.4);
+  it("adds one source anchor fallback for an otherwise unlinked named entity in a durable conversation", async () => {
+    const input = extractionInput(
+      "conv-residency",
+      "Residency startup application notes",
+      "small talk",
+      0.4
+    );
     input.extraction.topics = [];
     input.extraction.entities = [
       graphItem(
@@ -82,6 +87,25 @@ describe("context graph builder", () => {
     expect(graph.sourceLinksById["conv-residency"].entity?.[0].label).toBe("The Residency");
     expect(graph.stats.sourceAnchorFallbacks).toBe(1);
     expect(graph.stats.underlinkedSources).toBe(1);
+  });
+
+  it("suppresses source anchor fallback promotion for transactional conversations", async () => {
+    const input = extractionInput("conv-greeting", "Greetings exchange", "small talk", 0.4);
+    input.extraction.topics = [];
+    input.extraction.entities = [
+      graphItem(
+        "The Residency",
+        "A startup incubator program discussed by the user.",
+        0.76
+      )
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes).toHaveLength(0);
+    expect(graph.stats.sourceAnchorFallbacks).toBe(0);
+    expect(graph.stats.underlinkedSources).toBe(1);
+    expect(graph.stats.demotedCandidates).toBeGreaterThanOrEqual(1);
   });
 
   it("does not add source anchor fallback for weak or unnamed context", async () => {
@@ -293,6 +317,93 @@ describe("context graph builder", () => {
     expect(neighborhoodLinks.some((node) => node.id === unrelated!.id)).toBe(false);
   });
 
+  it("redirects filename-labeled artifact candidates into the matching entity", async () => {
+    const input = extractionInput(
+      "conv-filename-merge",
+      "BodyScanner work notes",
+      "scanner",
+      0.95
+    );
+    input.extraction.entities = [
+      graphItem("OpenAIService.swift", "Service file used in the iOS app.", 0.98)
+    ];
+    input.extraction.artifacts = [
+      graphItem(
+        "OpenAIService.swift implementation",
+        "Implementation of the service file.",
+        0.97
+      )
+    ];
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
+
+    const filenameNodes = graph.nodes.filter((node) =>
+      /^openaiservice\.swift/i.test(node.label)
+    );
+    const artifactNodes = graph.nodes.filter((node) => node.type === "artifact");
+
+    expect(filenameNodes).toHaveLength(1);
+    expect(filenameNodes[0].type).toBe("entity");
+    expect(artifactNodes).toHaveLength(0);
+  });
+
+  it("suppresses canonical node promotion for transactional conversations", async () => {
+    const input = extractionInput(
+      "conv-transactional",
+      "Git checkout explanation",
+      "git checkout",
+      0.99
+    );
+    input.extraction.entities = [
+      graphItem("Git", "Version control system the user asked about.", 0.98)
+    ];
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
+
+    expect(graph.nodes.filter((node) => node.type === "entity")).toHaveLength(0);
+    expect(graph.stats.demotedCandidates).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still promotes canonical nodes when transactional content recurs across non-transactional conversations", async () => {
+    const transactionalInput = extractionInput(
+      "conv-trx",
+      "How to configure GitHub",
+      "github",
+      0.98
+    );
+    transactionalInput.extraction.entities = [
+      graphItem("GitHub", "Hosting platform the user uses.", 0.98)
+    ];
+
+    const durableInput = extractionInput(
+      "conv-durable",
+      "Project repo cleanup",
+      "github",
+      0.98
+    );
+    durableInput.extraction.entities = [
+      graphItem("GitHub", "Hosting platform the user uses.", 0.98)
+    ];
+
+    const graph = await buildContextGraph(
+      [transactionalInput, durableInput],
+      DEFAULT_SETTINGS,
+      provider
+    );
+
+    const github = graph.nodes.find((node) => node.label === "GitHub");
+    expect(github).toBeDefined();
+    expect(github!.sourceIds.sort()).toEqual(["conv-durable", "conv-trx"]);
+  });
+
   it("calls summary synthesis for nodes with sufficient evidence", async () => {
     const synthesizedLabels: string[] = [];
     const synthProvider: AIProvider = {
@@ -403,7 +514,9 @@ describe("context graph builder", () => {
     );
 
     expect(graph.nodes).toHaveLength(1);
-    expect(graph.nodes[0].confidence).toBe(0.95);
+    // Singleton-type group is anchored at 0.85 after rank-based rescaling;
+    // the merge still preserves the higher source confidence on per-evidence entries.
+    expect(graph.nodes[0].confidence).toBe(0.85);
     expect(graph.nodes[0].sourceIds.sort()).toEqual(["conv-1", "conv-2", "conv-3"]);
     expect(graph.stats.seededNodes).toBe(1);
     expect(graph.stats.prunedDuplicateNodes).toBe(1);
@@ -611,6 +724,76 @@ describe("context graph builder", () => {
     expect(graph.sourceLinksById["conv-many"].topic).toHaveLength(2);
     expect(graph.stats.sourceOnlyCandidates).toBe(3);
     expect(graph.stats.isolatedCanonicalNodes).toBe(0);
+  });
+
+  it("rescales confidence by rank within each node type so signal spreads across 0.55-0.99", async () => {
+    // Three topics in one conversation: one with rich evidence, one with one quote, one with one quote.
+    const input = extractionInput("conv-rescale", "Rescale source", "anchor", 0.96);
+    input.extraction.topics = [
+      {
+        label: "Heavily-supported topic",
+        summary: "Lots of evidence.",
+        confidence: 0.97,
+        evidence: [
+          { quote: "evidence one", turnRole: "user", confidence: 0.97 },
+          { quote: "evidence two", turnRole: "user", confidence: 0.97 },
+          { quote: "evidence three", turnRole: "user", confidence: 0.97 },
+          { quote: "evidence four", turnRole: "user", confidence: 0.97 }
+        ]
+      },
+      {
+        label: "Modest topic",
+        summary: "Two quotes.",
+        confidence: 0.97,
+        evidence: [
+          { quote: "modest one", turnRole: "user", confidence: 0.97 },
+          { quote: "modest two", turnRole: "user", confidence: 0.97 }
+        ]
+      },
+      {
+        label: "Thin topic",
+        summary: "One quote.",
+        confidence: 0.97,
+        evidence: [{ quote: "thin one", turnRole: "user", confidence: 0.97 }]
+      }
+    ];
+
+    const distinctProvider: AIProvider = {
+      ...provider,
+      async embedText(text: string): Promise<number[]> {
+        const lower = text.toLowerCase();
+        if (lower.includes("heavily")) return [1, 0, 0, 0];
+        if (lower.includes("modest")) return [0, 1, 0, 0];
+        if (lower.includes("thin")) return [0, 0, 1, 0];
+        return [0, 0, 0, 1];
+      }
+    };
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1, synthesizeNodeSummaries: false },
+      distinctProvider
+    );
+
+    const topics = graph.nodes
+      .filter((node) => node.type === "topic")
+      .sort((left, right) => right.evidence.length - left.evidence.length);
+
+    expect(topics).toHaveLength(3);
+    expect(topics[0].confidence).toBeCloseTo(0.99, 2);
+    expect(topics[2].confidence).toBeCloseTo(0.55, 2);
+    expect(topics[0].confidence - topics[2].confidence).toBeGreaterThanOrEqual(0.4);
+  });
+
+  it("anchors singleton-type buckets at 0.85 instead of 0.99 to avoid inflation", async () => {
+    const graph = await buildContextGraph(
+      [extractionInput("conv-singleton", "Singleton", "Obsidian", 0.98)],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1, synthesizeNodeSummaries: false },
+      provider
+    );
+
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0].confidence).toBe(0.85);
   });
 });
 

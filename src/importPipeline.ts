@@ -1,6 +1,6 @@
 import type { PersonalContextGraphSettings } from "./settings";
 import { buildContextGraph } from "./graphBuilder";
-import { createGraphFileDrafts, buildAgentContextPath } from "./markdown";
+import { createGraphFileDrafts, buildPrimaryAgentContextPath } from "./markdown";
 import type {
   AIProvider,
   BuiltContextGraph,
@@ -358,7 +358,7 @@ function createBaseReport(args: {
     sourceAnchorFallbackCount: args.graph.stats.sourceAnchorFallbacks,
     underlinkedSourceCount: args.graph.stats.underlinkedSources,
     anchorCandidateRejectedCount: args.graph.stats.anchorCandidatesRejected,
-    agentContextPath: buildAgentContextPath(args.settings),
+    agentContextPath: buildPrimaryAgentContextPath(args.settings),
     startedAt: args.startedAt,
     completedAt: args.completedAt,
     estimatedTokens: args.preview.estimatedTokens,

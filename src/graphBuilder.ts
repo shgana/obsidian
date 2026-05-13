@@ -105,6 +105,7 @@ export async function buildContextGraph(
 
   const unmatchedCandidates: Candidate[] = [];
   const sourceAnchorCandidatesBySource = new Map<string, Candidate[]>();
+  const transactionalSourceIds = new Set<string>();
   const processCandidate = async (
     candidate: Candidate,
     options: { allowUnmatched: boolean; includeAlias: boolean; includeSummary: boolean }
@@ -139,13 +140,18 @@ export async function buildContextGraph(
     sourceAnchorCandidatesBySource.set(input.conversation.sourceId, sourceAnchors.candidates);
     graph.stats.anchorCandidatesRejected += sourceAnchors.rejected;
 
+    const conversationIsTransactional = isTransactionalConversation(input);
+    if (conversationIsTransactional) {
+      transactionalSourceIds.add(input.conversation.sourceId);
+    }
+
     for (const type of CONTEXT_NODE_TYPES) {
       const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
       const candidates = prioritizeItems(type, items)
         .map((item) => normalizeItemForGraph(item, input))
         .filter((item) => item.confidence >= settings.confidenceThreshold && item.evidence.length > 0)
         .map<Candidate>((item) => ({
-          type,
+          type: redirectCandidateType(type, item.label),
           item,
           input,
           sourcePath,
@@ -191,7 +197,7 @@ export async function buildContextGraph(
 
       for (const candidate of candidates) {
         await processCandidate(candidate, {
-          allowUnmatched: true,
+          allowUnmatched: !conversationIsTransactional,
           includeAlias: true,
           includeSummary: true
         });
@@ -235,6 +241,7 @@ export async function buildContextGraph(
     graph,
     registry,
     sourceAnchorCandidatesBySource,
+    transactionalSourceIds,
     settings,
     provider
   );
@@ -242,6 +249,7 @@ export async function buildContextGraph(
   addCoOccurrenceLinks(graph, settings);
   await addSemanticSimilarityLinks(graph, settings, provider);
   graph.stats.demotedCandidates += applyGraphHygiene(graph, registry);
+  rescaleNodeConfidence(graph);
   await synthesizeNodeSummaries(graph, settings, provider);
   rebuildEvidenceEdges(graph);
   finalizeGraphStats(graph, registry);
@@ -685,7 +693,7 @@ function collectSourceAnchorCandidates(
 
     for (const item of items) {
       const candidate: Candidate = {
-        type,
+        type: redirectCandidateType(type, item.label),
         item,
         input,
         sourcePath,
@@ -717,6 +725,7 @@ async function applySourceAnchorFallback(
   graph: BuiltContextGraph,
   registry: MatchRegistry,
   sourceAnchorCandidatesBySource: Map<string, Candidate[]>,
+  transactionalSourceIds: Set<string>,
   settings: PersonalContextGraphSettings,
   provider: AIProvider
 ): Promise<void> {
@@ -739,6 +748,12 @@ async function applySourceAnchorFallback(
       addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
       graph.stats.mergedCandidates += 1;
       graph.stats.sourceAnchorFallbacks += 1;
+      continue;
+    }
+
+    if (transactionalSourceIds.has(sourceId)) {
+      graph.stats.sourceOnlyCandidates += 1;
+      graph.stats.demotedCandidates += 1;
       continue;
     }
 
@@ -1126,6 +1141,57 @@ async function addSemanticSimilarityLinks(
   }
 }
 
+const RESCALE_TOP = 0.99;
+const RESCALE_BOTTOM = 0.55;
+const RESCALE_SINGLETON = 0.85;
+
+function rescaleNodeConfidence(graph: BuiltContextGraph): void {
+  if (graph.nodes.length === 0) {
+    return;
+  }
+
+  const nodesByType = new Map<ContextNodeType, GraphNode[]>();
+  for (const node of graph.nodes) {
+    const bucket = nodesByType.get(node.type) || [];
+    bucket.push(node);
+    nodesByType.set(node.type, bucket);
+  }
+
+  for (const nodes of nodesByType.values()) {
+    if (nodes.length === 1) {
+      nodes[0].confidence = RESCALE_SINGLETON;
+      continue;
+    }
+
+    const sorted = [...nodes].sort((left, right) => {
+      const evidenceDelta = right.evidence.length - left.evidence.length;
+      if (evidenceDelta !== 0) {
+        return evidenceDelta;
+      }
+
+      const sourceDelta = right.sourceIds.length - left.sourceIds.length;
+      if (sourceDelta !== 0) {
+        return sourceDelta;
+      }
+
+      const confidenceDelta = right.confidence - left.confidence;
+      if (confidenceDelta !== 0) {
+        return confidenceDelta;
+      }
+
+      return left.label.localeCompare(right.label);
+    });
+
+    const span = RESCALE_TOP - RESCALE_BOTTOM;
+    const stepCount = sorted.length - 1;
+    for (let index = 0; index < sorted.length; index += 1) {
+      const rankFraction = index / stepCount;
+      const rescaled = RESCALE_TOP - rankFraction * span;
+      sorted[index].confidence = Math.round(rescaled * 100) / 100;
+    }
+  }
+}
+
 function applyGraphHygiene(graph: BuiltContextGraph, registry: MatchRegistry): number {
   const degrees = computeCanonicalDegrees(graph);
   const isolatedIds = new Set(
@@ -1274,12 +1340,14 @@ function matchKeys(
   const keys = values.flatMap((value) => {
     const slug = slugify(value);
     const normalizedSlug = normalizedLabelSlug(value);
+    const filenameSlug = normalizedFilenameLabelSlug(value);
     return uniqueStrings([
       `${type}:${slug}`,
       normalizedSlug && normalizedSlug !== slug ? `${type}:normalized:${normalizedSlug}` : "",
       type !== "project" && normalizedAppProductLabelSlug(value)
         ? `${type}:app-product:${normalizedAppProductLabelSlug(value)}`
-        : ""
+        : "",
+      type !== "project" && filenameSlug ? `${type}:filename:${filenameSlug}` : ""
     ]);
   });
 
@@ -1321,6 +1389,12 @@ function passesSemanticGuard(
   const leftAppProductSlug = normalizedAppProductLabelSlug(leftLabel);
   const rightAppProductSlug = normalizedAppProductLabelSlug(rightLabel);
   if (leftAppProductSlug && leftAppProductSlug === rightAppProductSlug) {
+    return true;
+  }
+
+  const leftFilenameSlug = normalizedFilenameLabelSlug(leftLabel);
+  const rightFilenameSlug = normalizedFilenameLabelSlug(rightLabel);
+  if (leftFilenameSlug && leftFilenameSlug === rightFilenameSlug) {
     return true;
   }
 
@@ -1377,6 +1451,105 @@ function normalizedProjectLabelSlug(label: string): string {
     .filter((token) => !projectStopWords.has(token))
     .slice(0, 5)
     .join("-");
+}
+
+const FILENAME_EXTENSIONS = new Set([
+  "swift",
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "py",
+  "md",
+  "json",
+  "yaml",
+  "yml",
+  "toml",
+  "rs",
+  "go",
+  "java",
+  "kt",
+  "h",
+  "m",
+  "mm",
+  "cpp",
+  "cc",
+  "c",
+  "css",
+  "scss",
+  "sass",
+  "less",
+  "html",
+  "htm",
+  "vue",
+  "rb",
+  "sh",
+  "bash",
+  "sql",
+  "proto",
+  "graphql",
+  "gql",
+  "lua",
+  "php",
+  "pl",
+  "scala"
+]);
+
+const FILENAME_VARIANT_SUFFIX_PATTERN =
+  /\s+(?:source\s+file|source|implementation|code|impl|file|class|module|function|fn|view|controller)$/i;
+
+export function isFilenameLikeLabel(label: string): boolean {
+  return Boolean(normalizedFilenameLabelSlug(label));
+}
+
+function redirectCandidateType(type: ContextNodeType, label: string): ContextNodeType {
+  if (type === "artifact" && isFilenameLikeLabel(label)) {
+    return "entity";
+  }
+  return type;
+}
+
+const TRANSACTIONAL_TITLE_PATTERN =
+  /\b(comparison|critique|chat|exchange|explanation|greetings|guide|how[- ]to|overview|question|recommendation|recommendations|tip|tips|tutorial|walkthrough)\b/i;
+
+const TRANSACTIONAL_TITLE_PREFIX_PATTERN =
+  /^(how|what|why|when|where|which|can|is|are|does|do|should|will|would|could|add|configure|create|debug|delete|disable|enable|export|find|fix|generate|group|import|install|move|remove|reorganize|run|search|setup|use)\b/i;
+
+function isTransactionalConversation(input: ConversationExtraction): boolean {
+  const title = input.conversation.title.trim();
+  const summary = input.extraction.summary.trim();
+
+  const domain = projectDomainKey(`${title} ${summary}`);
+  if (domain && isNonProjectDomain(domain)) {
+    return true;
+  }
+
+  if (
+    TRANSACTIONAL_TITLE_PREFIX_PATTERN.test(title) ||
+    TRANSACTIONAL_TITLE_PATTERN.test(title)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function normalizedFilenameLabelSlug(label: string): string {
+  const trimmed = label.trim();
+  if (!trimmed || trimmed.startsWith("_")) {
+    return "";
+  }
+
+  const stripped = trimmed.replace(FILENAME_VARIANT_SUFFIX_PATTERN, "").trim();
+  const tokens = stripped.split(/\s+/);
+  for (const token of tokens) {
+    const match = /^([A-Za-z0-9_]+)\.([A-Za-z0-9]{1,6})$/.exec(token);
+    if (match && FILENAME_EXTENSIONS.has(match[2].toLowerCase())) {
+      return slugify(match[1]);
+    }
+  }
+
+  return "";
 }
 
 function normalizedAppProductLabelSlug(label: string): string {

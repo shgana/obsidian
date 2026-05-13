@@ -79,7 +79,7 @@ describe("import pipeline", () => {
     expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
   });
 
-  it("renders source notes, typed nodes, and agent context drafts", async () => {
+  it("renders source notes, typed nodes, and a sectioned agent context", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,
       openAiApiKey: "test",
@@ -96,7 +96,8 @@ describe("import pipeline", () => {
 
     expect(artifacts.report.processedConversationCount).toBe(1);
     expect(artifacts.drafts.every((draft) => draft.path.startsWith("Context Graph/"))).toBe(true);
-    expect(artifacts.drafts.some((draft) => draft.path.endsWith("Agent Context.md"))).toBe(true);
+    expect(artifacts.drafts.some((draft) => draft.path.endsWith("Agent Context.md"))).toBe(false);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(true);
     expect(artifacts.drafts.some((draft) => draft.path.includes("/Topics/"))).toBe(true);
 
     const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
@@ -105,14 +106,40 @@ describe("import pipeline", () => {
     expect(sourceDraft?.content).toContain("  - \"topic_obsidian\"");
     expect(sourceDraft?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
 
-    const agentDraft = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context.md"));
-    expect(agentDraft?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
-    expect(agentDraft?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+    const topicsSection = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/05 Recent Topics.md"
+    );
+    expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+    expect(artifacts.report.agentContextPath).toBe("Context Graph/Agent Context/README.md");
     expect(artifacts.checkpoint.sourceManifest).toHaveLength(1);
     expect("conversations" in artifacts.checkpoint).toBe(false);
   });
 
-  it("renders source anchor fallback links while retaining source-only context", async () => {
+  it("still emits a legacy Agent Context.md when sectioned mode is disabled", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1,
+      agentContextSections: false
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-legacy", "Obsidian agent graph")],
+      settings,
+      mockProvider
+    );
+
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context.md")).toBe(true);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(false);
+
+    const agentDraft = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context.md"));
+    expect(agentDraft?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(agentDraft?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+  });
+
+  it("renders source-only context for transactional conversations without promoting filler entities", async () => {
     const artifacts = await runImport(
       [conversation("conv-residency", "Greetings exchange", "Are you familiar with The Residency?")],
       {
@@ -126,11 +153,11 @@ describe("import pipeline", () => {
 
     const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
 
-    expect(artifacts.report.sourceAnchorFallbackCount).toBe(1);
-    expect(sourceDraft?.content).toContain("pcg_entities:");
-    expect(sourceDraft?.content).toContain("  - \"entity_the-residency\"");
-    expect(sourceDraft?.content).toContain("[[Context Graph/Entities/The Residency|The Residency]]");
+    expect(artifacts.report.sourceAnchorFallbackCount).toBe(0);
     expect(sourceDraft?.content).toContain("Chalice Chat AI interview");
+    expect(
+      artifacts.drafts.some((draft) => draft.path === "Context Graph/Entities/The Residency.md")
+    ).toBe(false);
   });
 
   it("enforces cost caps before provider extraction", async () => {

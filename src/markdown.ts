@@ -40,16 +40,16 @@ export function createGraphFileDrafts(
     });
   }
 
-  drafts.push({
-    path: buildAgentContextPath(settings),
-    content: renderAgentContext(inputs, graph, settings),
-    managed: true
-  });
-
   if (settings.agentContextSections) {
     for (const section of buildAgentContextSectionDrafts(inputs, graph, settings)) {
       drafts.push(section);
     }
+  } else {
+    drafts.push({
+      path: buildAgentContextPath(settings),
+      content: renderAgentContext(inputs, graph, settings),
+      managed: true
+    });
   }
 
   return drafts;
@@ -116,6 +116,15 @@ export function buildAgentContextPath(
   settings: Pick<PersonalContextGraphSettings, "outputFolder">
 ): string {
   return joinVaultPath(settings.outputFolder, "Agent Context.md");
+}
+
+export function buildPrimaryAgentContextPath(
+  settings: Pick<PersonalContextGraphSettings, "outputFolder" | "agentContextSections">
+): string {
+  if (settings.agentContextSections) {
+    return joinVaultPath(settings.outputFolder, "Agent Context", "README.md");
+  }
+  return buildAgentContextPath(settings);
 }
 
 function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGraph): string {

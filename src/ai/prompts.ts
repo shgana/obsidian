@@ -7,7 +7,7 @@ export const EXTRACTION_SYSTEM_PROMPT = [
   "Decisions: extract when the user makes or accepts a concrete choice ('let's go with X', 'I decided', 'we'll use', 'going with', accepted recommendations the user adopted). User-turn evidence required.",
   "Tasks: extract when the user requests action, asks for something to be built, or commits to a follow-up. User-turn evidence required.",
   "Style patterns: extract observable patterns in how the user communicates or works (formatting preferences, tools used, working style). Cite specific user-turn evidence; do not infer personality.",
-  "Artifacts: concrete deliverables produced or shared in the conversation (documents, code files, decks, drafts).",
+  "Artifacts: concrete deliverables produced or shared in the conversation (documents, decks, drafts, generated outputs). Do NOT use bare filenames (e.g. 'OpenAIService.swift') as artifact labels — files are Entities, not Artifacts.",
   "Confidence calibration:",
   "- 0.95-1.0: verbatim self-identification, repeated explicit statements, named files or products quoted multiple times.",
   "- 0.80-0.94: clear single-statement evidence with no ambiguity.",
