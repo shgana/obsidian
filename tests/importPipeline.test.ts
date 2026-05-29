@@ -70,13 +70,47 @@ describe("import pipeline", () => {
       (draft) => draft.path.endsWith("Agent Context/00 Identity.md")
     );
     const topicsSection = artifacts.drafts.find(
-      (draft) => draft.path.endsWith("Agent Context/05 Recent Topics.md")
+      (draft) => draft.path.endsWith("Agent Context/08 Recent Topics.md")
     );
 
     expect(readme?.content).toContain("Sectioned retrieval surface");
     expect(identitySection?.content).toContain("[[Context Graph/Entities/_Me|_Me]]");
     expect(topicsSection?.content).toContain("Obsidian");
     expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+  });
+
+  it("runs self-model extraction and prioritizes agent instructions before topic context", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-self-model", "Self model test")],
+      settings,
+      selfModelProvider
+    );
+
+    const readme = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/README.md"
+    );
+    const agentInstructionSection = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/01 Agent Instructions.md"
+    );
+    const topicSection = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/08 Recent Topics.md"
+    );
+
+    expect(readme?.content.indexOf("01 Agent Instructions")).toBeLessThan(
+      readme?.content.indexOf("08 Recent Topics") || Number.MAX_SAFE_INTEGER
+    );
+    expect(agentInstructionSection?.content).toContain("Use inspectable Markdown memory");
+    expect(agentInstructionSection?.content).toContain("**Agent instruction:** Prefer visible, source-backed Markdown context over hidden memory.");
+    expect(topicSection?.content).toContain("Obsidian");
+    expect(artifacts.report.canonicalSelfModelNodeCount).toBe(1);
   });
 
   it("renders source notes, typed nodes, and a sectioned agent context", async () => {
@@ -107,7 +141,7 @@ describe("import pipeline", () => {
     expect(sourceDraft?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
 
     const topicsSection = artifacts.drafts.find(
-      (draft) => draft.path === "Context Graph/Agent Context/05 Recent Topics.md"
+      (draft) => draft.path === "Context Graph/Agent Context/08 Recent Topics.md"
     );
     expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
     expect(artifacts.report.agentContextPath).toBe("Context Graph/Agent Context/README.md");
@@ -203,6 +237,9 @@ const mockProvider: AIProvider = {
       ],
       entities: [],
       projects: [],
+      patterns: [],
+      principles: [],
+      agentInstructions: [],
       preferences: [],
       decisions: [],
       tasks: [],
@@ -216,6 +253,34 @@ const mockProvider: AIProvider = {
   },
   async synthesizeSummary(): Promise<string> {
     return "";
+  }
+};
+
+const selfModelProvider: AIProvider = {
+  ...mockProvider,
+  async extractSelfModel(): Promise<Partial<ExtractedContext>> {
+    return {
+      summary: "The user wants source-backed agent memory.",
+      confidence: 0.96,
+      agentInstructions: [
+        {
+          label: "Use inspectable Markdown memory",
+          summary: "The user wants agents to rely on visible, source-backed Markdown context.",
+          confidence: 0.96,
+          stability: "stable",
+          inferenceLevel: "explicit",
+          appliesTo: ["agent memory", "Obsidian"],
+          agentInstruction: "Prefer visible, source-backed Markdown context over hidden memory.",
+          evidence: [
+            {
+              quote: "Build this as an Obsidian plugin.",
+              turnRole: "user",
+              confidence: 0.96
+            }
+          ]
+        }
+      ]
+    };
   }
 };
 
@@ -255,6 +320,9 @@ const residencyProvider: AIProvider = {
         }
       ],
       projects: [],
+      patterns: [],
+      principles: [],
+      agentInstructions: [],
       preferences: [],
       decisions: [],
       tasks: [],

@@ -4,6 +4,7 @@ import { createGraphFileDrafts, buildPrimaryAgentContextPath } from "./markdown"
 import type {
   AIProvider,
   BuiltContextGraph,
+  CanonicalContextState,
   CanonicalNodeSeed,
   ConversationExtraction,
   ExtractedContext,
@@ -61,7 +62,8 @@ const EMBEDDING_MODEL_PRICES_USD_PER_1M: Record<string, number> = {
 };
 
 const EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION = 1800;
-const STRUCTURED_OUTPUT_TOKEN_RATIO = 0.25;
+const SELF_MODEL_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION = 1000;
+const STRUCTURED_OUTPUT_TOKEN_RATIO = 0.35;
 const EMBEDDING_TOKEN_RATIO = 0.35;
 
 export function createImportPreview(
@@ -100,10 +102,13 @@ export async function runImport(
   conversations: ParsedConversation[],
   settings: PersonalContextGraphSettings,
   provider: AIProvider,
-  seedsOrProgress: CanonicalNodeSeed[] | ((progress: ImportProgress) => void) = [],
+  seedsOrProgress:
+    | CanonicalNodeSeed[]
+    | CanonicalContextState
+    | ((progress: ImportProgress) => void) = [],
   onProgress?: (progress: ImportProgress) => void
 ): Promise<ImportArtifacts> {
-  const seeds = Array.isArray(seedsOrProgress) ? seedsOrProgress : [];
+  const canonicalState = normalizeCanonicalState(seedsOrProgress);
   const progress = typeof seedsOrProgress === "function" ? seedsOrProgress : onProgress;
   const startedAt = nowIso();
   const selectedConversations = selectConversations(conversations, settings);
@@ -137,7 +142,7 @@ export async function runImport(
     completed: selectedConversations.length,
     total: selectedConversations.length
   });
-  const graph = await buildContextGraph(inputs, settings, provider, seeds);
+  const graph = await buildContextGraph(inputs, settings, provider, canonicalState);
 
   progress?.({
     phase: "rendering",
@@ -221,15 +226,62 @@ async function extractConversation(
 ): Promise<ExtractedContext> {
   const chunks = splitConversation(conversation, settings.maxPromptChars);
   if (chunks.length === 1) {
-    return provider.extractContext(conversation);
+    return extractConversationChunk(conversation, settings, provider);
   }
 
   const extractions: ExtractedContext[] = [];
   for (const chunk of chunks) {
-    extractions.push(await provider.extractContext(chunk));
+    extractions.push(await extractConversationChunk(chunk, settings, provider));
   }
 
   return mergeChunkExtractions(conversation, extractions);
+}
+
+async function extractConversationChunk(
+  conversation: ParsedConversation,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<ExtractedContext> {
+  const baseExtraction = await provider.extractContext(conversation);
+  if (!settings.enableSelfModelExtraction || !provider.extractSelfModel) {
+    return mergeSelfModelExtraction(baseExtraction, {});
+  }
+
+  const selfModel = await provider.extractSelfModel(conversation, baseExtraction);
+  return mergeSelfModelExtraction(baseExtraction, selfModel);
+}
+
+function mergeSelfModelExtraction(
+  baseExtraction: ExtractedContext,
+  selfModel: Partial<ExtractedContext>
+): ExtractedContext {
+  return {
+    ...baseExtraction,
+    summary: mergeText(baseExtraction.summary, selfModel.summary || ""),
+    confidence: Math.max(baseExtraction.confidence, selfModel.confidence || 0),
+    patterns: mergeItems([
+      ...(baseExtraction.patterns || []),
+      ...(selfModel.patterns || []),
+      ...(baseExtraction.stylePatterns || [])
+    ]),
+    principles: mergeItems([
+      ...(baseExtraction.principles || []),
+      ...(selfModel.principles || [])
+    ]),
+    agentInstructions: mergeItems([
+      ...(baseExtraction.agentInstructions || []),
+      ...(selfModel.agentInstructions || [])
+    ]),
+    preferences: mergeItems([
+      ...baseExtraction.preferences,
+      ...(selfModel.preferences || [])
+    ]),
+    decisions: mergeItems([
+      ...baseExtraction.decisions,
+      ...(selfModel.decisions || [])
+    ]),
+    stylePatterns: mergeItems(selfModel.stylePatterns || [])
+  };
 }
 
 function splitConversation(
@@ -292,6 +344,9 @@ function mergeChunkExtractions(
     topics: mergeItems(extractions.flatMap((extraction) => extraction.topics)),
     entities: mergeItems(extractions.flatMap((extraction) => extraction.entities)),
     projects: mergeItems(extractions.flatMap((extraction) => extraction.projects)),
+    patterns: mergeItems(extractions.flatMap((extraction) => extraction.patterns)),
+    principles: mergeItems(extractions.flatMap((extraction) => extraction.principles)),
+    agentInstructions: mergeItems(extractions.flatMap((extraction) => extraction.agentInstructions)),
     preferences: mergeItems(extractions.flatMap((extraction) => extraction.preferences)),
     decisions: mergeItems(extractions.flatMap((extraction) => extraction.decisions)),
     tasks: mergeItems(extractions.flatMap((extraction) => extraction.tasks)),
@@ -314,7 +369,14 @@ function mergeItems(items: ExtractedContextItem[]): ExtractedContextItem[] {
         matchingItems.flatMap((candidate) => candidate.evidence),
         (evidence) => evidence.quote
       ).slice(0, 5),
-      summary: matchingItems.map((candidate) => candidate.summary).join(" ").slice(0, 800)
+      summary: matchingItems.map((candidate) => candidate.summary).join(" ").slice(0, 800),
+      stability: strongestStability(matchingItems),
+      inferenceLevel: strongestInferenceLevel(matchingItems),
+      appliesTo: uniqueBy(
+        matchingItems.flatMap((candidate) => candidate.appliesTo || []),
+        (value) => value.toLowerCase()
+      ).slice(0, 8),
+      agentInstruction: matchingItems.find((candidate) => candidate.agentInstruction)?.agentInstruction
     };
   });
 }
@@ -358,6 +420,14 @@ function createBaseReport(args: {
     sourceAnchorFallbackCount: args.graph.stats.sourceAnchorFallbacks,
     underlinkedSourceCount: args.graph.stats.underlinkedSources,
     anchorCandidateRejectedCount: args.graph.stats.anchorCandidatesRejected,
+    reviewQueueItemCount: args.graph.stats.reviewQueueItems,
+    promotedReviewItemCount: args.graph.stats.promotedReviewItems,
+    suppressedReviewItemCount: args.graph.stats.suppressedReviewItems,
+    canonicalSelfModelNodeCount: args.graph.stats.canonicalSelfModelNodes,
+    inferredCanonicalNodeCount: args.graph.stats.inferredCanonicalNodes,
+    nounNodeCount: args.graph.stats.nounNodeCount,
+    selfModelNodeCount: args.graph.stats.selfModelNodeCount,
+    nounToSelfModelRatio: args.graph.stats.nounToSelfModelRatio,
     agentContextPath: buildPrimaryAgentContextPath(args.settings),
     startedAt: args.startedAt,
     completedAt: args.completedAt,
@@ -378,8 +448,10 @@ function estimateImportCostUsd(
   settings: PersonalContextGraphSettings
 ): CostEstimate {
   const extractionInputTokens =
-    estimatedTokens +
-    selectedConversationCount * EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION;
+    estimatedTokens * (settings.enableSelfModelExtraction ? 2 : 1) +
+    selectedConversationCount *
+      (EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION +
+        (settings.enableSelfModelExtraction ? SELF_MODEL_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION : 0));
   const extractionOutputTokens = Math.ceil(estimatedTokens * STRUCTURED_OUTPUT_TOKEN_RATIO);
   const embeddingTokens = Math.ceil(estimatedTokens * EMBEDDING_TOKEN_RATIO);
   const extractionPrice = extractionModelPrice(settings);
@@ -397,6 +469,63 @@ function estimateImportCostUsd(
     embeddingCostUsd,
     totalCostUsd: extractionCostUsd + embeddingCostUsd
   };
+}
+
+function normalizeCanonicalState(
+  value: CanonicalNodeSeed[] | CanonicalContextState | ((progress: ImportProgress) => void)
+): CanonicalContextState {
+  if (typeof value === "function") {
+    return {
+      nodeSeeds: [],
+      reviewSeeds: []
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      nodeSeeds: value,
+      reviewSeeds: []
+    };
+  }
+
+  return {
+    nodeSeeds: value.nodeSeeds || [],
+    reviewSeeds: value.reviewSeeds || []
+  };
+}
+
+function mergeText(left: string, right: string): string {
+  if (!right || left.includes(right)) {
+    return left;
+  }
+
+  if (!left) {
+    return right;
+  }
+
+  return `${left} ${right}`.slice(0, 1000);
+}
+
+function strongestStability(items: ExtractedContextItem[]): ExtractedContextItem["stability"] {
+  const rank: Record<NonNullable<ExtractedContextItem["stability"]>, number> = {
+    stable: 4,
+    recurring: 3,
+    situational: 2,
+    temporary: 1
+  };
+
+  return items
+    .map((item) => item.stability)
+    .filter((value): value is NonNullable<ExtractedContextItem["stability"]> => Boolean(value))
+    .sort((left, right) => rank[right] - rank[left])[0];
+}
+
+function strongestInferenceLevel(
+  items: ExtractedContextItem[]
+): ExtractedContextItem["inferenceLevel"] {
+  return items.some((item) => item.inferenceLevel === "explicit")
+    ? "explicit"
+    : items.find((item) => item.inferenceLevel)?.inferenceLevel;
 }
 
 function extractionModelPrice(settings: PersonalContextGraphSettings): TokenPrice {

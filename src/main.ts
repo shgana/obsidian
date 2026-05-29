@@ -9,7 +9,7 @@ import {
   createImportPreview,
   runImport
 } from "./importPipeline";
-import { loadCanonicalNodeSeeds } from "./canonicalIndex";
+import { loadCanonicalContextState } from "./canonicalIndex";
 import { ImportConsentModal, ProgressModal, ZipImportModal } from "./modals";
 import { DEFAULT_SETTINGS, type PersonalContextGraphSettings } from "./settings";
 import { PersonalContextGraphSettingTab } from "./settingsTab";
@@ -114,8 +114,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
 
     try {
       const provider = new OpenAIProvider(this.settings);
-      const seeds = await loadCanonicalNodeSeeds(this.app.vault, this.settings);
-      const artifacts = await runImport(conversations, this.settings, provider, seeds, (status) => {
+      const canonicalState = await loadCanonicalContextState(this.app.vault, this.settings);
+      const artifacts = await runImport(conversations, this.settings, provider, canonicalState, (status) => {
         progress.update(`${status.message} (${status.completed}/${status.total})`);
       });
       const writer = new ManagedVaultWriter(this.app.vault, this.settings);
@@ -201,7 +201,8 @@ function migrateSettings(
     ...value,
     rememberOpenAiApiKey: value.rememberOpenAiApiKey ?? false,
     linkAgentContextToGraph: value.linkAgentContextToGraph ?? false,
-    pruneStaleManagedFiles: value.pruneStaleManagedFiles ?? true
+    pruneStaleManagedFiles: value.pruneStaleManagedFiles ?? true,
+    enableSelfModelExtraction: value.enableSelfModelExtraction ?? true
   };
 
   if (!settings.rememberOpenAiApiKey) {

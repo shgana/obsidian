@@ -4,6 +4,7 @@ import {
   CONTEXT_NODE_TYPES,
   type AIProvider,
   type BuiltContextGraph,
+  type CanonicalContextState,
   type CanonicalNodeSeed,
   type ContextNodeType,
   type ConversationExtraction,
@@ -11,7 +12,9 @@ import {
   type GraphBuildStats,
   type GraphEdge,
   type GraphNode,
-  type NodeEvidence
+  type NodeEvidence,
+  type ReviewQueueItem,
+  type ReviewQueueSeed
 } from "./types";
 import { cosineSimilarity, hashString, sanitizeFileName, slugify, uniqueBy } from "./text";
 
@@ -19,6 +22,9 @@ const ITEMS_BY_TYPE: Record<ContextNodeType, keyof ConversationExtraction["extra
   topic: "topics",
   entity: "entities",
   project: "projects",
+  pattern: "patterns",
+  principle: "principles",
+  agent_instruction: "agentInstructions",
   preference: "preferences",
   decision: "decisions",
   task: "tasks",
@@ -27,18 +33,30 @@ const ITEMS_BY_TYPE: Record<ContextNodeType, keyof ConversationExtraction["extra
 };
 
 const GRAPH_ITEM_LIMITS: Record<ContextNodeType, number> = {
-  topic: 10,
-  entity: 8,
-  project: 5,
+  topic: 6,
+  entity: 5,
+  project: 4,
+  pattern: 8,
+  principle: 6,
+  agent_instruction: 8,
   preference: 7,
   decision: 7,
   task: 8,
-  artifact: 7,
+  artifact: 5,
   style_pattern: 5
 };
 
 const SOURCE_ANCHOR_TYPES: ContextNodeType[] = ["entity", "topic", "artifact"];
 const SOURCE_ANCHOR_MIN_CONFIDENCE = 0.7;
+const SELF_MODEL_TYPES = new Set<ContextNodeType>([
+  "pattern",
+  "principle",
+  "agent_instruction",
+  "preference",
+  "decision"
+]);
+const NOUN_HEAVY_TYPES = new Set<ContextNodeType>(["topic", "entity", "artifact"]);
+const REVIEW_QUEUE_MIN_CONFIDENCE = 0.65;
 
 interface Candidate {
   type: ContextNodeType;
@@ -65,6 +83,12 @@ interface MatchRegistry {
   activeNodeIds: Set<string>;
 }
 
+interface ReviewRegistry {
+  approvedSeeds: CanonicalNodeSeed[];
+  rejectedKeys: Set<string>;
+  pendingKeys: Set<string>;
+}
+
 type ProjectCandidateKind = "durable_project" | "domain_evidence" | "non_project";
 type ProjectDomainKey = string;
 
@@ -79,15 +103,83 @@ interface ProjectCandidateClassification {
   domain?: ProjectDomainKey;
 }
 
+function normalizeCanonicalState(
+  value: CanonicalNodeSeed[] | CanonicalContextState
+): CanonicalContextState {
+  if (Array.isArray(value)) {
+    return {
+      nodeSeeds: value,
+      reviewSeeds: []
+    };
+  }
+
+  return {
+    nodeSeeds: value.nodeSeeds || [],
+    reviewSeeds: value.reviewSeeds || []
+  };
+}
+
+function buildReviewRegistry(reviewSeeds: ReviewQueueSeed[]): ReviewRegistry {
+  const approvedSeeds: CanonicalNodeSeed[] = [];
+  const rejectedKeys = new Set<string>();
+  const pendingKeys = new Set<string>();
+
+  for (const seed of reviewSeeds) {
+    const canonicalSeed = reviewSeedToCanonicalSeed(seed);
+    if (seed.status === "approved") {
+      approvedSeeds.push(canonicalSeed);
+      continue;
+    }
+
+    const keys = reviewKeys(seed.type, seed.label, seed.aliases, seed.summary);
+    for (const key of keys) {
+      if (seed.status === "rejected") {
+        rejectedKeys.add(key);
+      } else {
+        pendingKeys.add(key);
+      }
+    }
+  }
+
+  return {
+    approvedSeeds,
+    rejectedKeys,
+    pendingKeys
+  };
+}
+
+function reviewSeedToCanonicalSeed(seed: ReviewQueueSeed): CanonicalNodeSeed {
+  return {
+    type: seed.type,
+    id: `${seed.type}_${seed.slug || slugify(seed.label)}`,
+    label: seed.label,
+    slug: seed.slug || slugify(seed.label),
+    aliases: seed.aliases,
+    path: buildNodePath(seed.type, seed.label, seed.path.split("/").slice(0, -2).join("/") || "Context Graph"),
+    summary: seed.summary,
+    confidence: seed.confidence,
+    evidence: seed.evidence,
+    sourceIds: seed.sourceIds,
+    lastSeen: seed.lastSeen,
+    stability: seed.stability,
+    inferenceLevel: seed.inferenceLevel,
+    appliesTo: seed.appliesTo,
+    agentInstruction: seed.agentInstruction
+  };
+}
+
 export async function buildContextGraph(
   inputs: ConversationExtraction[],
   settings: PersonalContextGraphSettings,
   provider: AIProvider,
-  seeds: CanonicalNodeSeed[] = []
+  seedsOrState: CanonicalNodeSeed[] | CanonicalContextState = []
 ): Promise<BuiltContextGraph> {
+  const canonicalState = normalizeCanonicalState(seedsOrState);
+  const reviewRegistry = buildReviewRegistry(canonicalState.reviewSeeds);
   const graph: BuiltContextGraph = {
     nodes: [],
     edges: [],
+    reviewQueueItems: [],
     sourcePathsById: {},
     sourceLinksById: {},
     nodeLinksById: {},
@@ -101,7 +193,21 @@ export async function buildContextGraph(
     seedNodeIds: new Set<string>(),
     activeNodeIds: new Set<string>()
   };
-  await seedCanonicalNodes(graph, registry, seeds, settings, provider);
+  await seedCanonicalNodes(
+    graph,
+    registry,
+    [...canonicalState.nodeSeeds, ...reviewRegistry.approvedSeeds],
+    settings,
+    provider
+  );
+  await activateApprovedReviewSeeds(
+    graph,
+    registry,
+    reviewRegistry.approvedSeeds,
+    settings,
+    provider
+  );
+  graph.stats.promotedReviewItems = reviewRegistry.approvedSeeds.length;
 
   const unmatchedCandidates: Candidate[] = [];
   const sourceAnchorCandidatesBySource = new Map<string, Candidate[]>();
@@ -110,6 +216,12 @@ export async function buildContextGraph(
     candidate: Candidate,
     options: { allowUnmatched: boolean; includeAlias: boolean; includeSummary: boolean }
   ): Promise<void> => {
+    if (isRejectedReviewCandidate(candidate, reviewRegistry)) {
+      graph.stats.suppressedReviewItems += 1;
+      graph.stats.demotedCandidates += 1;
+      return;
+    }
+
     const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
     if (existingNode) {
       activateNode(graph, registry, existingNode);
@@ -146,10 +258,10 @@ export async function buildContextGraph(
     }
 
     for (const type of CONTEXT_NODE_TYPES) {
-      const items = input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
+      const items = (input.extraction[ITEMS_BY_TYPE[type]] || []) as ExtractedContextItem[];
       const candidates = prioritizeItems(type, items)
         .map((item) => normalizeItemForGraph(item, input))
-        .filter((item) => item.confidence >= settings.confidenceThreshold && item.evidence.length > 0)
+        .filter((item) => isEligibleExtractedItem(type, item, settings))
         .map<Candidate>((item) => ({
           type: redirectCandidateType(type, item.label),
           item,
@@ -231,6 +343,11 @@ export async function buildContextGraph(
       }
       graph.stats.mergedCandidates += Math.max(0, cluster.candidates.length - 1);
       indexNode(node, registry.nodeIndex);
+    } else if (isReviewableSelfModelCluster(cluster, reviewRegistry)) {
+      graph.reviewQueueItems.push(createReviewQueueItem(cluster, settings.outputFolder));
+      graph.stats.reviewQueueItems += 1;
+      graph.stats.sourceOnlyCandidates += cluster.candidates.length;
+      graph.stats.demotedCandidates += cluster.candidates.length;
     } else {
       graph.stats.sourceOnlyCandidates += cluster.candidates.length;
       graph.stats.demotedCandidates += cluster.candidates.length;
@@ -255,6 +372,7 @@ export async function buildContextGraph(
   finalizeGraphStats(graph, registry);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
+  graph.reviewQueueItems.sort((left, right) => left.path.localeCompare(right.path));
   return graph;
 }
 
@@ -274,7 +392,15 @@ function createStats(): GraphBuildStats {
     filteredSeedAliases: 0,
     sourceAnchorFallbacks: 0,
     underlinkedSources: 0,
-    anchorCandidatesRejected: 0
+    anchorCandidatesRejected: 0,
+    reviewQueueItems: 0,
+    promotedReviewItems: 0,
+    suppressedReviewItems: 0,
+    canonicalSelfModelNodes: 0,
+    inferredCanonicalNodes: 0,
+    nounNodeCount: 0,
+    selfModelNodeCount: 0,
+    nounToSelfModelRatio: 0
   };
 }
 
@@ -287,7 +413,7 @@ async function seedCanonicalNodes(
 ): Promise<void> {
   const orderedSeeds = [...seeds].sort(compareSeedSurvivorPriority);
   for (const seed of orderedSeeds) {
-    const seedResult = seedToNode(seed);
+    const seedResult = seedToNode(seed, settings.outputFolder);
     graph.stats.filteredSeedAliases += seedResult.filteredAliasCount;
     if (!seedResult.node) {
       continue;
@@ -316,6 +442,39 @@ async function seedCanonicalNodes(
   }
 }
 
+async function activateApprovedReviewSeeds(
+  graph: BuiltContextGraph,
+  registry: MatchRegistry,
+  seeds: CanonicalNodeSeed[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  for (const seed of seeds) {
+    const node = await findNodeMatchForLabel(
+      seed.type,
+      seed.label,
+      seed.summary,
+      seed.aliases,
+      registry,
+      graph,
+      settings,
+      provider
+    );
+    if (!node) {
+      continue;
+    }
+
+    activateNode(graph, registry, node);
+    for (const evidence of node.evidence) {
+      if (!graph.sourcePathsById[evidence.sourceId]) {
+        graph.sourcePathsById[evidence.sourceId] = evidence.sourcePath;
+      }
+      graph.sourceLinksById[evidence.sourceId] = graph.sourceLinksById[evidence.sourceId] || {};
+      addSourceLink(graph, evidence.sourceId, node.type, node);
+    }
+  }
+}
+
 function registerNodeForMatching(registry: MatchRegistry, node: GraphNode, fromSeed: boolean): void {
   if (!registry.nodes.some((candidate) => candidate.id === node.id)) {
     registry.nodes.push(node);
@@ -339,30 +498,64 @@ function activateNode(
   graph.nodes.push(node);
 }
 
-function seedToNode(seed: CanonicalNodeSeed): { node?: GraphNode; filteredAliasCount: number } {
-  const aliases = seed.type === "project" ? filterProjectSeedAliases(seed) : uniqueStrings(seed.aliases || []);
-  if (seed.type === "project" && !isDurableProjectSeed(seed)) {
+function seedToNode(
+  seed: CanonicalNodeSeed,
+  outputFolder: string
+): { node?: GraphNode; filteredAliasCount: number } {
+  const type = redirectCandidateType(seed.type, seed.label);
+  const normalizedSeed = normalizeSeedForType(seed, type, outputFolder);
+  const aliases = type === "project"
+    ? filterProjectSeedAliases(normalizedSeed)
+    : uniqueStrings(normalizedSeed.aliases || []);
+  if (type === "project" && !isDurableProjectSeed(normalizedSeed)) {
     return {
       filteredAliasCount: seed.aliases.length
     };
   }
 
-  const resetProjectEvidence = seed.type === "project";
+  const resetProjectEvidence = type === "project";
   return {
-    filteredAliasCount: seed.aliases.length - aliases.length,
+    filteredAliasCount: Math.max(0, seed.aliases.length - aliases.length),
     node: {
-      id: seed.id,
-      type: seed.type,
-      label: seed.label,
-      slug: seed.slug || slugify(seed.label),
+      id: normalizedSeed.id,
+      type,
+      label: normalizedSeed.label,
+      slug: normalizedSeed.slug || slugify(normalizedSeed.label),
       aliases,
-      path: seed.path,
-      summary: seed.summary,
-      confidence: seed.confidence,
-      evidence: resetProjectEvidence ? [] : [...seed.evidence],
-      sourceIds: resetProjectEvidence ? [] : uniqueStrings(seed.sourceIds || []),
-      lastSeen: seed.lastSeen
+      path: normalizedSeed.path,
+      summary: normalizedSeed.summary,
+      confidence: normalizedSeed.confidence,
+      evidence: resetProjectEvidence ? [] : [...normalizedSeed.evidence],
+      sourceIds: resetProjectEvidence ? [] : uniqueStrings(normalizedSeed.sourceIds || []),
+      lastSeen: normalizedSeed.lastSeen,
+      stability: normalizedSeed.stability,
+      inferenceLevel: normalizedSeed.inferenceLevel,
+      appliesTo: normalizedSeed.appliesTo,
+      agentInstruction: normalizedSeed.agentInstruction
     }
+  };
+}
+
+function normalizeSeedForType(
+  seed: CanonicalNodeSeed,
+  type: ContextNodeType,
+  outputFolder: string
+): CanonicalNodeSeed {
+  const label = canonicalLabelForType(type, seed.label, seed.summary);
+  const slug = slugify(label);
+  const aliases = uniqueStrings([
+    seed.label,
+    ...(seed.aliases || [])
+  ]).filter((alias) => slugify(alias) !== slug);
+
+  return {
+    ...seed,
+    type,
+    id: `${type}_${slug}`,
+    label,
+    slug,
+    aliases,
+    path: buildNodePath(type, label, outputFolder)
   };
 }
 
@@ -406,6 +599,46 @@ function normalizeItemForGraph(
     ...item,
     label: normalizeLabel(item.label, input.conversation.title)
   };
+}
+
+function isEligibleExtractedItem(
+  type: ContextNodeType,
+  item: ExtractedContextItem,
+  settings: PersonalContextGraphSettings
+): boolean {
+  if (item.evidence.length === 0) {
+    return false;
+  }
+
+  const redirectedType = redirectCandidateType(type, item.label);
+  const threshold = SELF_MODEL_TYPES.has(redirectedType)
+    ? REVIEW_QUEUE_MIN_CONFIDENCE
+    : settings.confidenceThreshold;
+  return item.confidence >= threshold;
+}
+
+function isRejectedReviewCandidate(
+  candidate: Candidate,
+  reviewRegistry: ReviewRegistry
+): boolean {
+  return reviewKeys(
+    candidate.type,
+    candidate.item.label,
+    [],
+    candidate.item.summary
+  ).some((key) => reviewRegistry.rejectedKeys.has(key));
+}
+
+function reviewKeys(
+  type: ContextNodeType,
+  label: string,
+  aliases: string[],
+  summary = ""
+): string[] {
+  return matchKeys(type, label, aliases, summary).filter((key) =>
+    /:(?:normalized|app-product|filename|project-domain|project-normalized):/.test(key) ||
+    key === `${type}:${slugify(label)}`
+  );
 }
 
 function normalizeLabel(label: string, conversationTitle: string): string {
@@ -653,6 +886,27 @@ function shouldPromoteCluster(
     ...cluster.candidates.map((candidate) => candidate.item.confidence)
   );
 
+  if (SELF_MODEL_TYPES.has(cluster.type)) {
+    const representative = chooseRepresentative(cluster.candidates);
+    if (
+      representative.item.inferenceLevel === "explicit" &&
+      maxConfidence >= settings.singleSourcePromotionThreshold
+    ) {
+      return true;
+    }
+
+    if (
+      sourceCount >= settings.minimumCanonicalSources &&
+      (representative.item.inferenceLevel === "explicit" ||
+        representative.item.stability === "stable" ||
+        representative.item.stability === "recurring")
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
   if (sourceCount >= settings.minimumCanonicalSources) {
     return true;
   }
@@ -678,6 +932,80 @@ function shouldPromoteCluster(
   return false;
 }
 
+function isReviewableSelfModelCluster(
+  cluster: CandidateCluster,
+  reviewRegistry: ReviewRegistry
+): boolean {
+  if (!SELF_MODEL_TYPES.has(cluster.type)) {
+    return false;
+  }
+
+  const representative = chooseRepresentative(cluster.candidates);
+  if (representative.item.confidence < REVIEW_QUEUE_MIN_CONFIDENCE) {
+    return false;
+  }
+
+  return !reviewKeys(
+    cluster.type,
+    representative.item.label,
+    [],
+    representative.item.summary
+  ).some((key) => reviewRegistry.pendingKeys.has(key));
+}
+
+function createReviewQueueItem(
+  cluster: CandidateCluster,
+  outputFolder: string
+): ReviewQueueItem {
+  const representative = chooseRepresentative(cluster.candidates);
+  const label = canonicalLabelForType(cluster.type, representative.item.label, representative.item.summary);
+  const slug = slugify(label);
+  const evidence = uniqueBy(
+    cluster.candidates.flatMap((candidate) =>
+      candidate.item.evidence.map<NodeEvidence>((entry) => ({
+        sourceId: candidate.sourceId,
+        sourceTitle: candidate.input.conversation.title,
+        sourcePath: candidate.sourcePath,
+        quote: entry.quote,
+        confidence: Math.min(candidate.item.confidence, entry.confidence)
+      }))
+    ),
+    (entry) => `${entry.sourceId}:${entry.quote}`
+  )
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, 12);
+
+  return {
+    id: `review_${cluster.type}_${slug}`,
+    type: cluster.type,
+    label,
+    slug,
+    aliases: uniqueStrings(
+      cluster.candidates
+        .map((candidate) => candidate.item.label)
+        .filter((value) => slugify(value) !== slug)
+    ).slice(0, 8),
+    path: joinVaultPath(
+      outputFolder,
+      "Review Queue",
+      `${sanitizeFileName(`${cluster.type} - ${label}`)}.md`
+    ),
+    summary: representative.item.summary,
+    confidence: representative.item.confidence,
+    evidence,
+    sourceIds: uniqueStrings(cluster.candidates.map((candidate) => candidate.sourceId)),
+    lastSeen:
+      representative.input.conversation.updateTime ||
+      representative.input.conversation.createTime ||
+      representative.input.extraction.extractedAt,
+    stability: representative.item.stability,
+    inferenceLevel: representative.item.inferenceLevel,
+    appliesTo: representative.item.appliesTo,
+    agentInstruction: representative.item.agentInstruction,
+    status: "pending"
+  };
+}
+
 function collectSourceAnchorCandidates(
   input: ConversationExtraction,
   sourcePath: string
@@ -688,7 +1016,7 @@ function collectSourceAnchorCandidates(
   for (const type of SOURCE_ANCHOR_TYPES) {
     const items = prioritizeItems(
       type,
-      input.extraction[ITEMS_BY_TYPE[type]] as ExtractedContextItem[]
+      (input.extraction[ITEMS_BY_TYPE[type]] || []) as ExtractedContextItem[]
     ).map((item) => normalizeItemForGraph(item, input));
 
     for (const item of items) {
@@ -847,19 +1175,37 @@ function createNode(
   outputFolder: string,
   slug: string
 ): GraphNode {
-  const fileName = sanitizeFileName(item.label);
+  const label = canonicalLabelForType(type, item.label, item.summary);
+  const nodeSlug = slugify(label) || slug;
   return {
-    id: `${type}_${slug}`,
+    id: `${type}_${nodeSlug}`,
     type,
-    label: item.label,
-    slug,
-    aliases: [],
-    path: joinVaultPath(outputFolder, CONTEXT_NODE_FOLDER[type], `${fileName}.md`),
+    label,
+    slug: nodeSlug,
+    aliases: slugify(item.label) === nodeSlug ? [] : [item.label],
+    path: buildNodePath(type, label, outputFolder),
     summary: item.summary,
     confidence: item.confidence,
     evidence: [],
-    sourceIds: []
+    sourceIds: [],
+    stability: item.stability,
+    inferenceLevel: item.inferenceLevel,
+    appliesTo: item.appliesTo,
+    agentInstruction: item.agentInstruction
   };
+}
+
+function buildNodePath(type: ContextNodeType, label: string, outputFolder: string): string {
+  const fileName = sanitizeFileName(label);
+  return joinVaultPath(outputFolder, CONTEXT_NODE_FOLDER[type], `${fileName}.md`);
+}
+
+function canonicalLabelForType(type: ContextNodeType, label: string, summary: string): string {
+  if (type === "project" && durableProjectDomainFromParts(label, summary) === "scann-fitness") {
+    return "Scann / Scanis";
+  }
+
+  return label;
 }
 
 function mergeCandidateIntoNode(
@@ -873,6 +1219,7 @@ function mergeCandidateIntoNode(
   if (includeSummary) {
     node.summary = mergeSummary(node.summary, candidate.item.summary);
   }
+  mergeSelfModelMetadata(node, candidate.item);
   node.lastSeen =
     candidate.input.conversation.updateTime ||
     candidate.input.conversation.createTime ||
@@ -900,29 +1247,77 @@ function mergeCandidateIntoNode(
 }
 
 function mergeSeedIntoNode(node: GraphNode, seed: CanonicalNodeSeed): void {
+  const normalizedSeed = normalizeSeedForType(seed, redirectCandidateType(seed.type, seed.label), node.path.split("/").slice(0, -2).join("/") || "Context Graph");
   if (node.type === "project") {
-    for (const alias of filterProjectSeedAliases(seed, node)) {
+    for (const alias of filterProjectSeedAliases(normalizedSeed, node)) {
       addAlias(node, alias);
     }
-    node.confidence = Math.max(node.confidence, seed.confidence);
-    node.lastSeen = maxStringDate(node.lastSeen, seed.lastSeen);
+    node.confidence = Math.max(node.confidence, normalizedSeed.confidence);
+    node.lastSeen = maxStringDate(node.lastSeen, normalizedSeed.lastSeen);
+    mergeSelfModelMetadata(node, normalizedSeed);
     return;
   }
 
-  node.confidence = Math.max(node.confidence, seed.confidence);
-  node.summary = mergeSummary(node.summary, seed.summary);
-  node.lastSeen = maxStringDate(node.lastSeen, seed.lastSeen);
-  node.sourceIds = uniqueStrings([...node.sourceIds, ...seed.sourceIds]);
-  for (const alias of [seed.label, ...seed.aliases]) {
+  node.confidence = Math.max(node.confidence, normalizedSeed.confidence);
+  node.summary = mergeSummary(node.summary, normalizedSeed.summary);
+  node.lastSeen = maxStringDate(node.lastSeen, normalizedSeed.lastSeen);
+  node.sourceIds = uniqueStrings([...node.sourceIds, ...normalizedSeed.sourceIds]);
+  mergeSelfModelMetadata(node, normalizedSeed);
+  for (const alias of [normalizedSeed.label, ...normalizedSeed.aliases]) {
     addAlias(node, alias);
   }
 
   node.evidence = uniqueBy(
-    [...node.evidence, ...seed.evidence],
+    [...node.evidence, ...normalizedSeed.evidence],
     (entry) => `${entry.sourceId}:${entry.quote}`
   )
     .sort((left, right) => right.confidence - left.confidence)
     .slice(0, 30);
+}
+
+function mergeSelfModelMetadata(
+  node: GraphNode,
+  item: Pick<
+    ExtractedContextItem | CanonicalNodeSeed,
+    "stability" | "inferenceLevel" | "appliesTo" | "agentInstruction"
+  >
+): void {
+  node.stability = strongestStabilityValue(node.stability, item.stability);
+  node.inferenceLevel = strongestInferenceValue(node.inferenceLevel, item.inferenceLevel);
+  node.appliesTo = uniqueStrings([
+    ...(node.appliesTo || []),
+    ...(item.appliesTo || [])
+  ]).slice(0, 8);
+  if (!node.agentInstruction && item.agentInstruction) {
+    node.agentInstruction = item.agentInstruction;
+  }
+}
+
+function strongestStabilityValue(
+  left?: ExtractedContextItem["stability"],
+  right?: ExtractedContextItem["stability"]
+): ExtractedContextItem["stability"] {
+  const rank: Record<NonNullable<ExtractedContextItem["stability"]>, number> = {
+    stable: 4,
+    recurring: 3,
+    situational: 2,
+    temporary: 1
+  };
+
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return rank[right] > rank[left] ? right : left;
+}
+
+function strongestInferenceValue(
+  left?: ExtractedContextItem["inferenceLevel"],
+  right?: ExtractedContextItem["inferenceLevel"]
+): ExtractedContextItem["inferenceLevel"] {
+  return left === "explicit" || right === "explicit" ? "explicit" : left || right;
 }
 
 function addAlias(node: GraphNode, label: string): void {
@@ -1237,6 +1632,18 @@ function finalizeGraphStats(graph: BuiltContextGraph, registry: MatchRegistry): 
   graph.stats.unmatchedSeedNodes = Math.max(0, registry.seedNodeIds.size - visibleSeedNodes);
   graph.stats.visibleCanonicalNodes = graph.nodes.length;
   graph.stats.isolatedCanonicalNodes = countIsolatedCanonicalNodes(graph);
+  graph.stats.canonicalSelfModelNodes = graph.nodes.filter((node) =>
+    SELF_MODEL_TYPES.has(node.type)
+  ).length;
+  graph.stats.inferredCanonicalNodes = graph.nodes.filter(
+    (node) => node.inferenceLevel === "supported_inference"
+  ).length;
+  graph.stats.nounNodeCount = graph.nodes.filter((node) => NOUN_HEAVY_TYPES.has(node.type)).length;
+  graph.stats.selfModelNodeCount = graph.stats.canonicalSelfModelNodes;
+  graph.stats.nounToSelfModelRatio =
+    graph.stats.selfModelNodeCount === 0
+      ? graph.stats.nounNodeCount
+      : Math.round((graph.stats.nounNodeCount / graph.stats.selfModelNodeCount) * 100) / 100;
 }
 
 function countIsolatedCanonicalNodes(graph: BuiltContextGraph): number {
@@ -1503,9 +1910,14 @@ export function isFilenameLikeLabel(label: string): boolean {
 }
 
 function redirectCandidateType(type: ContextNodeType, label: string): ContextNodeType {
-  if (type === "artifact" && isFilenameLikeLabel(label)) {
-    return "entity";
+  if (type === "style_pattern") {
+    return "pattern";
   }
+
+  if ((type === "entity" || type === "artifact") && isFilenameLikeLabel(label)) {
+    return "artifact";
+  }
+
   return type;
 }
 
@@ -1586,6 +1998,10 @@ function projectDomainKey(text: string): ProjectDomainKey | undefined {
     return "ai-learning-app";
   }
 
+  if (hasAny("scann", "scanis", "scannai", "bodyscanner")) {
+    return "scann-fitness";
+  }
+
   if (hasAny("job", "displacement") && hasAny("role", "tech", "estimate", "career")) {
     return "ai-job-research";
   }
@@ -1598,7 +2014,7 @@ function projectDomainKey(text: string): ProjectDomainKey | undefined {
     hasAny("neck", "posture", "slouch", "backwaist", "angle") &&
     hasAny("score", "calibration", "metric", "base", "posture")
   ) {
-    return "posture-scoring";
+    return "scann-fitness";
   }
 
   if (

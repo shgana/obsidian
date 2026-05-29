@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { EXTRACTION_SYSTEM_PROMPT, NODE_SYNTHESIS_SYSTEM_PROMPT } from "../src/ai/prompts";
+import {
+  EXTRACTION_SYSTEM_PROMPT,
+  NODE_SYNTHESIS_SYSTEM_PROMPT,
+  SELF_MODEL_SYSTEM_PROMPT
+} from "../src/ai/prompts";
 
 describe("OpenAI extraction prompt", () => {
   it("keeps evidence-backed proper nouns from short or generic conversations", () => {
@@ -28,5 +32,16 @@ describe("Node synthesis prompt", () => {
     expect(NODE_SYNTHESIS_SYSTEM_PROMPT).toContain("ONE or TWO sentences");
     expect(NODE_SYNTHESIS_SYSTEM_PROMPT).toContain("third person");
     expect(NODE_SYNTHESIS_SYSTEM_PROMPT).toContain("not enumerate");
+  });
+});
+
+describe("Self-model extraction prompt", () => {
+  it("focuses on agent-useful behavioral memory with calibrated inference levels", () => {
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("agent-memory compiler");
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("Patterns");
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("Principles");
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("Agent instructions");
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("supported_inference");
+    expect(SELF_MODEL_SYSTEM_PROMPT).toContain("review-worthy inference");
   });
 });

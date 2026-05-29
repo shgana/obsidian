@@ -113,6 +113,24 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     text: `Rejected anchor candidates: ${report.anchorCandidateRejectedCount ?? 0}`
   });
   list.createEl("li", {
+    text: `Review queue items: ${report.reviewQueueItemCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Approved review items promoted: ${report.promotedReviewItemCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Rejected review items suppressed: ${report.suppressedReviewItemCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Canonical self-model nodes: ${report.canonicalSelfModelNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Inferred canonical nodes: ${report.inferredCanonicalNodeCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Noun/self-model ratio: ${report.nounToSelfModelRatio ?? 0}`
+  });
+  list.createEl("li", {
     text: `Pruned duplicate nodes: ${report.prunedDuplicateNodeCount ?? 0}`
   });
   list.createEl("li", {

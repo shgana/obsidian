@@ -3,9 +3,12 @@ import type { PersonalContextGraphSettings } from "./settings";
 import {
   CONTEXT_NODE_LABEL,
   CONTEXT_NODE_TYPES,
+  type CanonicalContextState,
   type CanonicalNodeSeed,
   type ContextNodeType,
-  type NodeEvidence
+  type NodeEvidence,
+  type ReviewQueueSeed,
+  type ReviewStatus
 } from "./types";
 import { hashString, slugify } from "./text";
 
@@ -19,6 +22,13 @@ export async function loadCanonicalNodeSeeds(
   vault: Vault,
   settings: Pick<PersonalContextGraphSettings, "outputFolder">
 ): Promise<CanonicalNodeSeed[]> {
+  return (await loadCanonicalContextState(vault, settings)).nodeSeeds;
+}
+
+export async function loadCanonicalContextState(
+  vault: Vault,
+  settings: Pick<PersonalContextGraphSettings, "outputFolder">
+): Promise<CanonicalContextState> {
   const outputFolder = normalizeVaultPath(settings.outputFolder);
   const managedFiles: ParsedManagedFile[] = [];
 
@@ -37,9 +47,17 @@ export async function loadCanonicalNodeSeeds(
   }
 
   const sourceIdByPath = buildSourceIdMap(managedFiles);
-  return managedFiles
+  const nodeSeeds = managedFiles
     .map((file) => managedFileToSeed(file, sourceIdByPath))
     .filter((seed): seed is CanonicalNodeSeed => Boolean(seed));
+  const reviewSeeds = managedFiles
+    .map((file) => managedFileToReviewSeed(file, sourceIdByPath))
+    .filter((seed): seed is ReviewQueueSeed => Boolean(seed));
+
+  return {
+    nodeSeeds,
+    reviewSeeds
+  };
 }
 
 export function parseManagedCanonicalSeed(
@@ -48,6 +66,21 @@ export function parseManagedCanonicalSeed(
   sourceIdByPath: Record<string, string> = {}
 ): CanonicalNodeSeed | undefined {
   return managedFileToSeed(
+    {
+      path,
+      content,
+      frontmatter: parseFrontmatter(content)
+    },
+    sourceIdByPath
+  );
+}
+
+export function parseManagedReviewSeed(
+  path: string,
+  content: string,
+  sourceIdByPath: Record<string, string> = {}
+): ReviewQueueSeed | undefined {
+  return managedFileToReviewSeed(
     {
       path,
       content,
@@ -104,7 +137,52 @@ function managedFileToSeed(
     confidence: asNumber(file.frontmatter.pcg_confidence, 0),
     evidence,
     sourceIds,
-    lastSeen: asString(file.frontmatter.pcg_last_seen)
+    lastSeen: asString(file.frontmatter.pcg_last_seen),
+    stability: asStability(file.frontmatter.pcg_stability),
+    inferenceLevel: asInferenceLevel(file.frontmatter.pcg_inference_level),
+    appliesTo: asStringArray(file.frontmatter.pcg_applies_to),
+    agentInstruction: asString(file.frontmatter.pcg_agent_instruction)
+  };
+}
+
+function managedFileToReviewSeed(
+  file: ParsedManagedFile,
+  sourceIdByPath: Record<string, string>
+): ReviewQueueSeed | undefined {
+  if (file.frontmatter.pcg_type !== "review_item" || file.frontmatter.pcg_managed !== true) {
+    return undefined;
+  }
+
+  const type = asContextNodeType(file.frontmatter.pcg_target_type);
+  const status = asReviewStatus(file.frontmatter.pcg_review_status);
+  if (!type || !status) {
+    return undefined;
+  }
+
+  const label = extractReviewLabel(file.content) || basenameWithoutMarkdown(file.path);
+  const evidence = parseEvidence(file.content, sourceIdByPath);
+  const sourceIds = uniqueStrings([
+    ...asStringArray(file.frontmatter.pcg_source_ids),
+    ...evidence.map((entry) => entry.sourceId)
+  ]);
+
+  return {
+    type,
+    id: asString(file.frontmatter.pcg_id) || `review_${type}_${slugify(label)}`,
+    label,
+    slug: slugify(label),
+    aliases: asStringArray(file.frontmatter.pcg_aliases),
+    path: file.path,
+    summary: extractSection(file.content, "Summary") || "",
+    confidence: asNumber(file.frontmatter.pcg_confidence, 0),
+    evidence,
+    sourceIds,
+    lastSeen: asString(file.frontmatter.pcg_last_seen),
+    stability: asStability(file.frontmatter.pcg_stability),
+    inferenceLevel: asInferenceLevel(file.frontmatter.pcg_inference_level),
+    appliesTo: asStringArray(file.frontmatter.pcg_applies_to),
+    agentInstruction: asString(file.frontmatter.pcg_agent_instruction),
+    status
   };
 }
 
@@ -228,6 +306,11 @@ function extractLabel(content: string, type: ContextNodeType): string | undefine
   return match?.[1]?.trim();
 }
 
+function extractReviewLabel(content: string): string | undefined {
+  const match = /^#\s+Review:\s+(.+)$/m.exec(content);
+  return match?.[1]?.trim();
+}
+
 function extractSection(content: string, heading: string): string | undefined {
   const headingMatch = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "m").exec(content);
   if (!headingMatch) {
@@ -257,6 +340,23 @@ function asStringArray(value: unknown): string[] {
 
 function asNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asReviewStatus(value: unknown): ReviewStatus | undefined {
+  return value === "pending" || value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function asStability(value: unknown): CanonicalNodeSeed["stability"] {
+  return value === "stable" ||
+    value === "recurring" ||
+    value === "situational" ||
+    value === "temporary"
+    ? value
+    : undefined;
+}
+
+function asInferenceLevel(value: unknown): CanonicalNodeSeed["inferenceLevel"] {
+  return value === "explicit" || value === "supported_inference" ? value : undefined;
 }
 
 function isInsideOutputFolder(path: string, outputFolder: string): boolean {

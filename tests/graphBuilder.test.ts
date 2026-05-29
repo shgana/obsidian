@@ -5,7 +5,8 @@ import type {
   CanonicalNodeSeed,
   ConversationExtraction,
   ExtractedContext,
-  ParsedConversation
+  ParsedConversation,
+  ReviewQueueSeed
 } from "../src/types";
 
 const provider: AIProvider = {
@@ -144,9 +145,9 @@ describe("context graph builder", () => {
     ];
 
     const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
-    const entityLabels = graph.nodes.filter((node) => node.type === "entity").map((node) => node.label);
+    const artifactLabels = graph.nodes.filter((node) => node.type === "artifact").map((node) => node.label);
 
-    expect(entityLabels).toEqual(["OpenAIService.swift"]);
+    expect(artifactLabels).toEqual(["OpenAIService.swift"]);
     expect(graph.stats.sourceAnchorFallbacks).toBe(0);
     expect(graph.stats.underlinkedSources).toBe(0);
   });
@@ -317,7 +318,7 @@ describe("context graph builder", () => {
     expect(neighborhoodLinks.some((node) => node.id === unrelated!.id)).toBe(false);
   });
 
-  it("redirects filename-labeled artifact candidates into the matching entity", async () => {
+  it("redirects filename-labeled entity candidates into the matching artifact", async () => {
     const input = extractionInput(
       "conv-filename-merge",
       "BodyScanner work notes",
@@ -347,8 +348,8 @@ describe("context graph builder", () => {
     const artifactNodes = graph.nodes.filter((node) => node.type === "artifact");
 
     expect(filenameNodes).toHaveLength(1);
-    expect(filenameNodes[0].type).toBe("entity");
-    expect(artifactNodes).toHaveLength(0);
+    expect(filenameNodes[0].type).toBe("artifact");
+    expect(artifactNodes).toHaveLength(1);
   });
 
   it("suppresses canonical node promotion for transactional conversations", async () => {
@@ -664,10 +665,10 @@ describe("context graph builder", () => {
     const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [scannSeed]);
     const project = graph.nodes.find((node) => node.type === "project");
 
-    expect(project?.label).toBe("AI scan evaluation improvement project");
+    expect(project?.label).toBe("Scann / Scanis");
     expect(project?.aliases).not.toContain("Funding breakdown & pitch deck for Scann");
     expect(project?.sourceIds).toEqual(["conv-deck"]);
-    expect(graph.sourceLinksById["conv-deck"].project?.[0].label).toBe("AI scan evaluation improvement project");
+    expect(graph.sourceLinksById["conv-deck"].project?.[0].label).toBe("Scann / Scanis");
     expect(graph.stats.projectEvidenceCandidates).toBe(1);
   });
 
@@ -795,6 +796,124 @@ describe("context graph builder", () => {
     expect(graph.nodes).toHaveLength(1);
     expect(graph.nodes[0].confidence).toBe(0.85);
   });
+
+  it("routes single-source supported self-model inferences to the review queue", async () => {
+    const input = extractionInput("conv-pattern-review", "UX references", "placeholder", 0.4);
+    input.extraction.topics = [];
+    input.extraction.patterns = [
+      {
+        label: "Reference-driven UX design",
+        summary: "The user draws UX mechanics from proven consumer apps.",
+        confidence: 0.78,
+        stability: "recurring",
+        inferenceLevel: "supported_inference",
+        appliesTo: ["product design", "onboarding"],
+        agentInstruction: "When designing UX, translate proven app mechanics into concrete flow decisions.",
+        evidence: [
+          {
+            quote: "I like Duolingo's lesson-first onboarding better.",
+            turnRole: "user",
+            confidence: 0.78
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes.filter((node) => node.type === "pattern")).toHaveLength(0);
+    expect(graph.reviewQueueItems).toHaveLength(1);
+    expect(graph.reviewQueueItems[0].label).toBe("Reference-driven UX design");
+    expect(graph.reviewQueueItems[0].status).toBe("pending");
+  });
+
+  it("promotes approved review items and suppresses rejected review items", async () => {
+    const approvedInput = extractionInput("conv-approved-review", "UX references", "placeholder", 0.4);
+    approvedInput.extraction.topics = [];
+    approvedInput.extraction.patterns = [
+      graphItem(
+        "Reference-driven UX design",
+        "The user draws UX mechanics from proven consumer apps.",
+        0.78
+      )
+    ];
+    approvedInput.extraction.patterns[0].inferenceLevel = "supported_inference";
+    approvedInput.extraction.patterns[0].stability = "recurring";
+
+    const approvedGraph = await buildContextGraph(
+      [approvedInput],
+      DEFAULT_SETTINGS,
+      provider,
+      {
+        nodeSeeds: [],
+        reviewSeeds: [
+          reviewSeed("approved", "pattern", "Reference-driven UX design")
+        ]
+      }
+    );
+
+    expect(approvedGraph.nodes.filter((node) => node.type === "pattern")).toHaveLength(1);
+    expect(approvedGraph.stats.promotedReviewItems).toBe(1);
+
+    const approvedSeedOnlyGraph = await buildContextGraph(
+      [],
+      DEFAULT_SETTINGS,
+      provider,
+      {
+        nodeSeeds: [],
+        reviewSeeds: [
+          reviewSeed("approved", "pattern", "Reference-driven UX design")
+        ]
+      }
+    );
+
+    expect(approvedSeedOnlyGraph.nodes.filter((node) => node.type === "pattern")).toHaveLength(1);
+
+    const rejectedGraph = await buildContextGraph(
+      [approvedInput],
+      DEFAULT_SETTINGS,
+      provider,
+      {
+        nodeSeeds: [],
+        reviewSeeds: [
+          reviewSeed("rejected", "pattern", "Reference-driven UX design")
+        ]
+      }
+    );
+
+    expect(rejectedGraph.nodes.filter((node) => node.type === "pattern")).toHaveLength(0);
+    expect(rejectedGraph.reviewQueueItems).toHaveLength(0);
+    expect(rejectedGraph.stats.suppressedReviewItems).toBe(1);
+  });
+
+  it("migrates legacy style pattern candidates into pattern nodes", async () => {
+    const input = extractionInput("conv-style-pattern", "Style request", "placeholder", 0.4);
+    input.extraction.topics = [];
+    input.extraction.stylePatterns = [
+      {
+        label: "Concise high-density writing",
+        summary: "The user prefers concise but information-dense writing.",
+        confidence: 0.96,
+        stability: "stable",
+        inferenceLevel: "explicit",
+        appliesTo: ["writing", "planning"],
+        agentInstruction: "Keep writing compact but dense.",
+        evidence: [
+          {
+            quote: "make it concise but still detailed enough to use",
+            turnRole: "user",
+            confidence: 0.96
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const pattern = graph.nodes.find((node) => node.type === "pattern");
+
+    expect(pattern?.label).toBe("Concise high-density writing");
+    expect(graph.nodes.some((node) => node.type === "style_pattern")).toBe(false);
+  });
 });
 
 function seed(
@@ -820,6 +939,38 @@ function seed(
       confidence
     })),
     sourceIds
+  };
+}
+
+function reviewSeed(
+  status: ReviewQueueSeed["status"],
+  type: ReviewQueueSeed["type"],
+  label: string
+): ReviewQueueSeed {
+  return {
+    type,
+    id: `review_${type}_${label.toLowerCase().replace(/\s+/g, "-")}`,
+    label,
+    slug: label.toLowerCase().replace(/\s+/g, "-"),
+    aliases: [],
+    path: `Context Graph/Review Queue/${type} - ${label}.md`,
+    summary: `${label} summary.`,
+    confidence: 0.78,
+    evidence: [
+      {
+        sourceId: "review-source",
+        sourceTitle: "Review source",
+        sourcePath: "Context Graph/Sources/ChatGPT/review-source.md",
+        quote: `${label} evidence`,
+        confidence: 0.78
+      }
+    ],
+    sourceIds: ["review-source"],
+    stability: "recurring",
+    inferenceLevel: "supported_inference",
+    appliesTo: ["product design"],
+    agentInstruction: "Use this reviewed self-model signal.",
+    status
   };
 }
 
@@ -877,6 +1028,9 @@ function extractionInput(
       ],
       entities: [],
       projects: [],
+      patterns: [],
+      principles: [],
+      agentInstructions: [],
       preferences: [],
       decisions: [],
       tasks: [],

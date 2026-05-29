@@ -165,6 +165,16 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Self-model extraction")
+      .setDesc("Adds a second pass for patterns, principles, preferences, decisions, and agent instructions.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.enableSelfModelExtraction).onChange(async (value) => {
+          this.host.settings.enableSelfModelExtraction = value;
+          await this.host.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Max source links per type")
       .setDesc("Caps visible wikilinks from each source note to canonical graph nodes.")
       .addText((text) =>

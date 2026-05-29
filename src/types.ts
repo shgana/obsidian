@@ -4,6 +4,9 @@ export type ContextNodeType =
   | "topic"
   | "entity"
   | "project"
+  | "pattern"
+  | "principle"
+  | "agent_instruction"
   | "preference"
   | "decision"
   | "task"
@@ -14,6 +17,9 @@ export const CONTEXT_NODE_TYPES: ContextNodeType[] = [
   "topic",
   "entity",
   "project",
+  "pattern",
+  "principle",
+  "agent_instruction",
   "preference",
   "decision",
   "task",
@@ -25,6 +31,9 @@ export const CONTEXT_NODE_FOLDER: Record<ContextNodeType, string> = {
   topic: "Topics",
   entity: "Entities",
   project: "Projects",
+  pattern: "Patterns",
+  principle: "Principles",
+  agent_instruction: "Agent Instructions",
   preference: "Preferences",
   decision: "Decisions",
   task: "Tasks",
@@ -36,6 +45,9 @@ export const CONTEXT_NODE_LABEL: Record<ContextNodeType, string> = {
   topic: "Topic",
   entity: "Entity",
   project: "Project",
+  pattern: "Pattern",
+  principle: "Principle",
+  agent_instruction: "Agent Instruction",
   preference: "Preference",
   decision: "Decision",
   task: "Task",
@@ -47,12 +59,19 @@ export const CONTEXT_NODE_PLURAL_LABEL: Record<ContextNodeType, string> = {
   topic: "Topics",
   entity: "Entities",
   project: "Projects",
+  pattern: "Patterns",
+  principle: "Principles",
+  agent_instruction: "Agent Instructions",
   preference: "Preferences",
   decision: "Decisions",
   task: "Tasks",
   artifact: "Artifacts",
   style_pattern: "Style Patterns"
 };
+
+export type SelfModelStability = "stable" | "recurring" | "situational" | "temporary";
+export type SelfModelInferenceLevel = "explicit" | "supported_inference";
+export type ReviewStatus = "pending" | "approved" | "rejected";
 
 export interface ConversationTurn {
   id: string;
@@ -84,6 +103,10 @@ export interface ExtractedContextItem {
   summary: string;
   confidence: number;
   evidence: Evidence[];
+  stability?: SelfModelStability;
+  inferenceLevel?: SelfModelInferenceLevel;
+  appliesTo?: string[];
+  agentInstruction?: string;
 }
 
 export interface ExtractedContext {
@@ -94,6 +117,9 @@ export interface ExtractedContext {
   topics: ExtractedContextItem[];
   entities: ExtractedContextItem[];
   projects: ExtractedContextItem[];
+  patterns: ExtractedContextItem[];
+  principles: ExtractedContextItem[];
+  agentInstructions: ExtractedContextItem[];
   preferences: ExtractedContextItem[];
   decisions: ExtractedContextItem[];
   tasks: ExtractedContextItem[];
@@ -120,6 +146,10 @@ export interface GraphNode {
   sourceIds: string[];
   lastSeen?: string;
   embedding?: number[];
+  stability?: SelfModelStability;
+  inferenceLevel?: SelfModelInferenceLevel;
+  appliesTo?: string[];
+  agentInstruction?: string;
 }
 
 export interface NodeEvidence {
@@ -144,6 +174,7 @@ export interface GraphEdge {
 export interface BuiltContextGraph {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  reviewQueueItems: ReviewQueueItem[];
   sourcePathsById: Record<string, string>;
   sourceLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   nodeLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
@@ -167,6 +198,14 @@ export interface GraphBuildStats {
   sourceAnchorFallbacks: number;
   underlinkedSources: number;
   anchorCandidatesRejected: number;
+  reviewQueueItems: number;
+  promotedReviewItems: number;
+  suppressedReviewItems: number;
+  canonicalSelfModelNodes: number;
+  inferredCanonicalNodes: number;
+  nounNodeCount: number;
+  selfModelNodeCount: number;
+  nounToSelfModelRatio: number;
 }
 
 export interface CanonicalNodeSeed {
@@ -181,6 +220,38 @@ export interface CanonicalNodeSeed {
   evidence: NodeEvidence[];
   sourceIds: string[];
   lastSeen?: string;
+  stability?: SelfModelStability;
+  inferenceLevel?: SelfModelInferenceLevel;
+  appliesTo?: string[];
+  agentInstruction?: string;
+}
+
+export interface ReviewQueueItem {
+  id: string;
+  type: ContextNodeType;
+  label: string;
+  slug: string;
+  aliases: string[];
+  path: string;
+  summary: string;
+  confidence: number;
+  evidence: NodeEvidence[];
+  sourceIds: string[];
+  lastSeen?: string;
+  stability?: SelfModelStability;
+  inferenceLevel?: SelfModelInferenceLevel;
+  appliesTo?: string[];
+  agentInstruction?: string;
+  status: ReviewStatus;
+}
+
+export interface ReviewQueueSeed extends ReviewQueueItem {
+  status: ReviewStatus;
+}
+
+export interface CanonicalContextState {
+  nodeSeeds: CanonicalNodeSeed[];
+  reviewSeeds: ReviewQueueSeed[];
 }
 
 export interface ImportPreview {
@@ -222,6 +293,14 @@ export interface GraphBuildReport {
   sourceAnchorFallbackCount: number;
   underlinkedSourceCount: number;
   anchorCandidateRejectedCount: number;
+  reviewQueueItemCount: number;
+  promotedReviewItemCount: number;
+  suppressedReviewItemCount: number;
+  canonicalSelfModelNodeCount: number;
+  inferredCanonicalNodeCount: number;
+  nounNodeCount: number;
+  selfModelNodeCount: number;
+  nounToSelfModelRatio: number;
   agentContextPath: string;
   startedAt: string;
   completedAt: string;
@@ -259,6 +338,10 @@ export interface SynthesizeSummaryArgs {
 
 export interface AIProvider {
   extractContext(conversation: ParsedConversation): Promise<ExtractedContext>;
+  extractSelfModel?(
+    conversation: ParsedConversation,
+    baseExtraction: ExtractedContext
+  ): Promise<Partial<ExtractedContext>>;
   embedText(text: string): Promise<number[]>;
   synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string>;
 }

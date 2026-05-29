@@ -9,11 +9,25 @@ import {
   type ExtractedContextItem,
   type FileDraft,
   type GraphNode,
-  type NodeEvidence
+  type NodeEvidence,
+  type ReviewQueueItem
 } from "./types";
 import { conversationToTranscript } from "./conversationText";
 import { hashString, slugify, truncate } from "./text";
 import { joinVaultPath } from "./graphBuilder";
+
+const AGENT_CONTEXT_NODE_ORDER: ContextNodeType[] = [
+  "agent_instruction",
+  "pattern",
+  "principle",
+  "preference",
+  "project",
+  "decision",
+  "task",
+  "topic",
+  "entity",
+  "artifact"
+];
 
 export function createGraphFileDrafts(
   inputs: ConversationExtraction[],
@@ -37,6 +51,15 @@ export function createGraphFileDrafts(
       path: node.path,
       content: renderNodeNote(node, graph),
       managed: true
+    });
+  }
+
+  for (const item of graph.reviewQueueItems) {
+    drafts.push({
+      path: item.path,
+      content: renderReviewQueueNote(item),
+      managed: true,
+      createOnly: true
     });
   }
 
@@ -89,6 +112,18 @@ function buildIdentityDraft(
     "- ",
     "",
     "## Working Style & Preferences",
+    "- ",
+    "",
+    "## Building Style",
+    "- ",
+    "",
+    "## Product Taste",
+    "- ",
+    "",
+    "## Recurring Projects",
+    "- ",
+    "",
+    "## Constraints & Boundaries",
     "- ",
     "",
     "## Key People",
@@ -184,18 +219,101 @@ function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
       pcg_evidence_count: node.evidence.length,
       pcg_aliases: node.aliases,
       pcg_source_ids: node.sourceIds,
-      pcg_source_paths: uniqueStrings(sourceLinks)
+      pcg_source_paths: uniqueStrings(sourceLinks),
+      pcg_stability: node.stability,
+      pcg_inference_level: node.inferenceLevel,
+      pcg_applies_to: node.appliesTo || [],
+      pcg_agent_instruction: node.agentInstruction
     }),
     `# ${CONTEXT_NODE_LABEL[node.type]}: ${node.label}`,
     "",
     "## Summary",
     node.summary,
     "",
+    ...renderSelfModelNodeSections(node),
+    "",
     "## Evidence",
     renderEvidenceList(node.evidence),
     "",
     "## Related Context",
     renderTypedLinks(relatedLinks),
+    "",
+    "## Source Conversations",
+    uniqueStrings(sourceLinks)
+      .map((link) => `- ${link}`)
+      .join("\n")
+  ].join("\n");
+}
+
+function renderSelfModelNodeSections(
+  node: Pick<
+    GraphNode | ReviewQueueItem,
+    "agentInstruction" | "stability" | "inferenceLevel" | "appliesTo"
+  >
+): string[] {
+  const lines: string[] = [];
+  if (node.agentInstruction) {
+    lines.push("## Agent Instruction");
+    lines.push(node.agentInstruction);
+    lines.push("");
+  }
+
+  const metadata: string[] = [];
+  if (node.stability) {
+    metadata.push(`- **Stability**: ${node.stability}`);
+  }
+  if (node.inferenceLevel) {
+    metadata.push(`- **Inference level**: ${node.inferenceLevel}`);
+  }
+  if (node.appliesTo && node.appliesTo.length > 0) {
+    metadata.push(`- **Applies to**: ${node.appliesTo.join(", ")}`);
+  }
+
+  if (metadata.length > 0) {
+    lines.push("## Self-Model Metadata");
+    lines.push(metadata.join("\n"));
+    lines.push("");
+  }
+
+  return lines;
+}
+
+function renderReviewQueueNote(item: ReviewQueueItem): string {
+  const sourceLinks = item.evidence.map((evidence) => evidence.sourcePath);
+  return [
+    yamlFrontmatter({
+      pcg_type: "review_item",
+      pcg_id: item.id,
+      pcg_source: "personal-context-graph",
+      pcg_managed: true,
+      pcg_protected: true,
+      pcg_review_status: item.status,
+      pcg_target_type: item.type,
+      pcg_confidence: round(item.confidence),
+      pcg_last_seen: item.lastSeen,
+      pcg_evidence_count: item.evidence.length,
+      pcg_aliases: item.aliases,
+      pcg_source_ids: item.sourceIds,
+      pcg_source_paths: uniqueStrings(sourceLinks),
+      pcg_stability: item.stability,
+      pcg_inference_level: item.inferenceLevel,
+      pcg_applies_to: item.appliesTo || [],
+      pcg_agent_instruction: item.agentInstruction
+    }),
+    `# Review: ${item.label}`,
+    "",
+    "## Review",
+    `- **Status**: ${item.status}`,
+    `- **Target type**: ${CONTEXT_NODE_LABEL[item.type]}`,
+    "- **How to review**: Change `pcg_review_status` in frontmatter to `approved` or `rejected`.",
+    "",
+    "## Summary",
+    item.summary,
+    "",
+    ...renderSelfModelNodeSections(item),
+    "",
+    "## Evidence",
+    renderEvidenceList(item.evidence),
     "",
     "## Source Conversations",
     uniqueStrings(sourceLinks)
@@ -224,7 +342,7 @@ function renderAgentContext(
     "## Profile Summary",
     renderProfileSummary(inputs),
     "",
-    ...CONTEXT_NODE_TYPES.flatMap((type) => [
+    ...AGENT_CONTEXT_NODE_ORDER.flatMap((type) => [
       `## ${CONTEXT_NODE_PLURAL_LABEL[type]}`,
       renderTopNodes(graph.nodes.filter((node) => node.type === type), settings.linkAgentContextToGraph),
       ""
@@ -249,6 +367,14 @@ interface AgentContextSection {
   description: string;
 }
 
+const SELF_MODEL_SECTION_TYPES = new Set<ContextNodeType>([
+  "agent_instruction",
+  "pattern",
+  "principle",
+  "preference",
+  "decision"
+]);
+
 const AGENT_CONTEXT_SECTIONS: AgentContextSection[] = [
   {
     type: "identity",
@@ -257,57 +383,69 @@ const AGENT_CONTEXT_SECTIONS: AgentContextSection[] = [
     description: "Pointer to your protected `_Me.md` identity card."
   },
   {
+    type: "agent_instruction",
+    title: "Agent Instructions",
+    fileName: "01 Agent Instructions.md",
+    description: "Operational guidance agents should follow when helping the user."
+  },
+  {
+    type: "pattern",
+    title: "Patterns",
+    fileName: "02 Patterns.md",
+    description: "Recurring user behavior, thinking styles, and builder workflows."
+  },
+  {
+    type: "principle",
+    title: "Principles",
+    fileName: "03 Principles.md",
+    description: "Durable rules and product/building principles inferred from evidence."
+  },
+  {
+    type: "preference",
+    title: "Preferences",
+    fileName: "04 Preferences.md",
+    description: "Stable preferences and requirements stated or strongly evidenced by the user."
+  },
+  {
     type: "project",
     title: "Active Projects",
-    fileName: "01 Active Projects.md",
+    fileName: "05 Active Projects.md",
     description: "Durable workstreams the user is actively building."
   },
   {
     type: "decision",
     title: "Decisions",
-    fileName: "02 Decisions.md",
+    fileName: "06 Decisions.md",
     description: "Choices the user has made or accepted, ranked by recency."
-  },
-  {
-    type: "preference",
-    title: "Preferences",
-    fileName: "03 Preferences.md",
-    description: "Stable preferences and requirements stated by the user."
   },
   {
     type: "task",
     title: "Tasks",
-    fileName: "04 Tasks.md",
+    fileName: "07 Tasks.md",
     description: "Outstanding asks and follow-ups from the user."
   },
   {
     type: "topic",
     title: "Recent Topics",
-    fileName: "05 Recent Topics.md",
+    fileName: "08 Recent Topics.md",
     description: "Topics the user has been thinking about, ranked by recency."
   },
   {
     type: "entity",
     title: "Entities",
-    fileName: "06 Entities.md",
-    description: "Named people, products, organizations, files, and frameworks."
+    fileName: "09 Entities.md",
+    description: "Named people, products, organizations, platforms, and frameworks."
   },
   {
     type: "artifact",
     title: "Artifacts",
-    fileName: "07 Artifacts.md",
-    description: "Concrete deliverables produced or shared in conversations."
-  },
-  {
-    type: "style_pattern",
-    title: "Style Patterns",
-    fileName: "08 Style Patterns.md",
-    description: "How the user prefers to communicate and work."
+    fileName: "10 Artifacts.md",
+    description: "Concrete deliverables and code/doc files produced or shared in conversations."
   },
   {
     type: "sources",
     title: "Source Conversations",
-    fileName: "09 Sources.md",
+    fileName: "11 Sources.md",
     description: "Pointers to the underlying source conversations."
   }
 ];
@@ -414,6 +552,11 @@ function renderAgentContextSection(
   const nodes = graph.nodes
     .filter((node) => node.type === section.type)
     .sort((left, right) => {
+      const selfModelDelta = selfModelRank(right) - selfModelRank(left);
+      if (selfModelDelta !== 0) {
+        return selfModelDelta;
+      }
+
       const recencyDelta = compareDateDesc(left.lastSeen, right.lastSeen);
       if (recencyDelta !== 0) {
         return recencyDelta;
@@ -439,6 +582,14 @@ function renderAgentContextSection(
     if (node.summary) {
       lines.push(node.summary);
     }
+    if (node.agentInstruction) {
+      lines.push("");
+      lines.push(`**Agent instruction:** ${node.agentInstruction}`);
+    }
+    if (node.appliesTo && node.appliesTo.length > 0) {
+      lines.push("");
+      lines.push(`**Applies to:** ${node.appliesTo.join(", ")}`);
+    }
     const relatedLinks = graph.nodeLinksById[node.id] || {};
     const relatedRendered = renderTypedLinks(relatedLinks);
     if (relatedRendered && !/No high-confidence/.test(relatedRendered)) {
@@ -450,6 +601,20 @@ function renderAgentContextSection(
   }
 
   return lines.join("\n");
+}
+
+function selfModelRank(node: GraphNode): number {
+  const stabilityRank = {
+    stable: 4,
+    recurring: 3,
+    situational: 2,
+    temporary: 1
+  }[node.stability || "temporary"];
+  const inferenceRank = node.inferenceLevel === "explicit" ? 2 : node.inferenceLevel ? 1 : 0;
+  return (SELF_MODEL_SECTION_TYPES.has(node.type) ? 100 : 0) +
+    stabilityRank * 10 +
+    inferenceRank +
+    node.evidence.length;
 }
 
 function latestInputDate(input: ConversationExtraction): string | undefined {
@@ -574,6 +739,9 @@ const EXTRACTION_ITEMS_BY_TYPE: Record<
   topic: "topics",
   entity: "entities",
   project: "projects",
+  pattern: "patterns",
+  principle: "principles",
+  agent_instruction: "agentInstructions",
   preference: "preferences",
   decision: "decisions",
   task: "tasks",
@@ -594,7 +762,7 @@ function renderSourceOnlyContext(
         ...node.aliases.map((alias) => slugify(alias))
       ])
     );
-    const items = input.extraction[EXTRACTION_ITEMS_BY_TYPE[type]] as ExtractedContextItem[];
+    const items = (input.extraction[EXTRACTION_ITEMS_BY_TYPE[type]] || []) as ExtractedContextItem[];
     const sourceOnlyItems = items
       .filter((item) => !promotedSlugs.has(slugify(item.label.replace(/\s+\(chunk\s+\d+\)$/i, ""))))
       .sort((left, right) => right.confidence - left.confidence)

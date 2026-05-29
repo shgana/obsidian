@@ -24,6 +24,7 @@ export interface PersonalContextGraphSettings {
   synthesizeNodeSummaries: boolean;
   synthesizeNodeSummaryMinEvidence: number;
   agentContextSections: boolean;
+  enableSelfModelExtraction: boolean;
   estimatedExtractionCostPer1MInputTokensUsd: number;
 }
 
@@ -51,5 +52,6 @@ export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   synthesizeNodeSummaries: true,
   synthesizeNodeSummaryMinEvidence: 3,
   agentContextSections: true,
+  enableSelfModelExtraction: true,
   estimatedExtractionCostPer1MInputTokensUsd: 0.25
 };

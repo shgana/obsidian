@@ -11,7 +11,11 @@ import type { PersonalContextGraphSettings } from "../settings";
 import { conversationToPrompt } from "../conversationText";
 import { nowIso } from "../text";
 import { CONTEXT_NODE_LABEL } from "../types";
-import { EXTRACTION_SYSTEM_PROMPT, NODE_SYNTHESIS_SYSTEM_PROMPT } from "./prompts";
+import {
+  EXTRACTION_SYSTEM_PROMPT,
+  NODE_SYNTHESIS_SYSTEM_PROMPT,
+  SELF_MODEL_SYSTEM_PROMPT
+} from "./prompts";
 
 interface OpenAITextContent {
   type?: string;
@@ -99,6 +103,76 @@ export class OpenAIProvider implements AIProvider {
     }
 
     return normalizeExtractedContext(JSON.parse(outputText), conversation);
+  }
+
+  async extractSelfModel(
+    conversation: ParsedConversation,
+    baseExtraction: ExtractedContext
+  ): Promise<Partial<ExtractedContext>> {
+    if (!this.settings.openAiApiKey.trim()) {
+      throw new Error("OpenAI API key is required before importing.");
+    }
+
+    const selfModelPayload = [
+      "Base extraction summary:",
+      baseExtraction.summary || "No summary.",
+      "",
+      "Conversation:",
+      conversationToPrompt(conversation, this.settings.maxPromptChars)
+    ].join("\n");
+
+    const response = await requestUrl({
+      url: "https://api.openai.com/v1/responses",
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+        "Content-Type": "application/json"
+      },
+      throw: false,
+      body: JSON.stringify({
+        model: this.settings.extractionModel,
+        input: [
+          {
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: SELF_MODEL_SYSTEM_PROMPT
+              }
+            ]
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: selfModelPayload
+              }
+            ]
+          }
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "personal_context_graph_self_model",
+            strict: true,
+            schema: SELF_MODEL_SCHEMA
+          }
+        }
+      })
+    });
+
+    const body = response.json as OpenAIResponseBody;
+    if (response.status >= 400 || body.error) {
+      throw new Error(formatOpenAiError("extraction", response.status, body));
+    }
+
+    const outputText = extractOutputText(body);
+    if (!outputText) {
+      throw new Error("OpenAI self-model extraction returned no structured output.");
+    }
+
+    return normalizeExtractedSelfModel(JSON.parse(outputText));
   }
 
   async synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string> {
@@ -245,6 +319,45 @@ const itemSchema = {
   }
 };
 
+const selfModelItemSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "label",
+    "summary",
+    "confidence",
+    "evidence",
+    "stability",
+    "inferenceLevel",
+    "appliesTo",
+    "agentInstruction"
+  ],
+  properties: {
+    ...itemSchema.properties,
+    evidence: {
+      type: "array",
+      maxItems: 4,
+      items: evidenceSchema
+    },
+    stability: {
+      type: "string",
+      enum: ["stable", "recurring", "situational", "temporary"]
+    },
+    inferenceLevel: {
+      type: "string",
+      enum: ["explicit", "supported_inference"]
+    },
+    appliesTo: {
+      type: "array",
+      maxItems: 6,
+      items: { type: "string" }
+    },
+    agentInstruction: {
+      type: "string"
+    }
+  }
+};
+
 const EXTRACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -312,6 +425,61 @@ const EXTRACTION_SCHEMA = {
   }
 };
 
+const SELF_MODEL_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "summary",
+    "confidence",
+    "patterns",
+    "principles",
+    "agentInstructions",
+    "preferences",
+    "decisions",
+    "stylePatterns"
+  ],
+  properties: {
+    summary: {
+      type: "string"
+    },
+    confidence: {
+      type: "number",
+      minimum: 0,
+      maximum: 1
+    },
+    patterns: {
+      type: "array",
+      maxItems: 8,
+      items: selfModelItemSchema
+    },
+    principles: {
+      type: "array",
+      maxItems: 6,
+      items: selfModelItemSchema
+    },
+    agentInstructions: {
+      type: "array",
+      maxItems: 8,
+      items: selfModelItemSchema
+    },
+    preferences: {
+      type: "array",
+      maxItems: 8,
+      items: selfModelItemSchema
+    },
+    decisions: {
+      type: "array",
+      maxItems: 6,
+      items: selfModelItemSchema
+    },
+    stylePatterns: {
+      type: "array",
+      maxItems: 4,
+      items: selfModelItemSchema
+    }
+  }
+};
+
 function extractOutputText(body: OpenAIResponseBody): string {
   if (body.output_text) {
     return body.output_text;
@@ -340,12 +508,29 @@ function normalizeExtractedContext(
     topics: normalizeItems(objectValue.topics),
     entities: normalizeItems(objectValue.entities),
     projects: normalizeItems(objectValue.projects),
+    patterns: normalizeItems(objectValue.patterns),
+    principles: normalizeItems(objectValue.principles),
+    agentInstructions: normalizeItems(objectValue.agentInstructions),
     preferences: normalizeItems(objectValue.preferences),
     decisions: normalizeItems(objectValue.decisions),
     tasks: normalizeItems(objectValue.tasks),
     artifacts: normalizeItems(objectValue.artifacts),
     stylePatterns: normalizeItems(objectValue.stylePatterns),
     extractedAt: nowIso()
+  };
+}
+
+function normalizeExtractedSelfModel(value: unknown): Partial<ExtractedContext> {
+  const objectValue = asRecord(value);
+  return {
+    summary: asString(objectValue.summary),
+    confidence: clampConfidence(objectValue.confidence),
+    patterns: normalizeItems(objectValue.patterns),
+    principles: normalizeItems(objectValue.principles),
+    agentInstructions: normalizeItems(objectValue.agentInstructions),
+    preferences: normalizeItems(objectValue.preferences),
+    decisions: normalizeItems(objectValue.decisions),
+    stylePatterns: normalizeItems(objectValue.stylePatterns)
   };
 }
 
@@ -361,10 +546,35 @@ function normalizeItems(value: unknown): ExtractedContextItem[] {
         label: asString(itemObject.label).trim(),
         summary: asString(itemObject.summary).trim(),
         confidence: clampConfidence(itemObject.confidence),
-        evidence: normalizeEvidence(itemObject.evidence)
+        evidence: normalizeEvidence(itemObject.evidence),
+        stability: normalizeStability(itemObject.stability),
+        inferenceLevel: normalizeInferenceLevel(itemObject.inferenceLevel),
+        appliesTo: normalizeStringArray(itemObject.appliesTo).slice(0, 6),
+        agentInstruction: asString(itemObject.agentInstruction).trim()
       };
     })
     .filter((item) => item.label && item.summary && item.evidence.length > 0);
+}
+
+function normalizeStability(value: unknown): ExtractedContextItem["stability"] {
+  return value === "stable" ||
+    value === "recurring" ||
+    value === "situational" ||
+    value === "temporary"
+    ? value
+    : undefined;
+}
+
+function normalizeInferenceLevel(value: unknown): ExtractedContextItem["inferenceLevel"] {
+  return value === "explicit" || value === "supported_inference" ? value : undefined;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .map((item) => asString(item).trim())
+        .filter(Boolean)
+    : [];
 }
 
 function normalizeEvidence(value: unknown): Evidence[] {
