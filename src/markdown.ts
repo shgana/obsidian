@@ -14,7 +14,7 @@ import {
 } from "./types";
 import { conversationToTranscript } from "./conversationText";
 import { hashString, slugify, truncate } from "./text";
-import { joinVaultPath } from "./graphBuilder";
+import { buildReviewQueuePath, joinVaultPath } from "./graphBuilder";
 
 const AGENT_CONTEXT_NODE_ORDER: ContextNodeType[] = [
   "agent_instruction",
@@ -54,14 +54,11 @@ export function createGraphFileDrafts(
     });
   }
 
-  for (const item of graph.reviewQueueItems) {
-    drafts.push({
-      path: item.path,
-      content: renderReviewQueueNote(item),
-      managed: true,
-      createOnly: true
-    });
-  }
+  drafts.push({
+    path: buildReviewQueuePath(settings.outputFolder),
+    content: renderReviewQueueInbox(graph.reviewQueueItems),
+    managed: true
+  });
 
   if (settings.agentContextSections) {
     for (const section of buildAgentContextSectionDrafts(inputs, graph, settings)) {
@@ -278,6 +275,91 @@ function renderSelfModelNodeSections(
   return lines;
 }
 
+function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
+  const sortedItems = [...items].sort((left, right) => {
+    const statusDelta = reviewStatusRank(left.status) - reviewStatusRank(right.status);
+    if (statusDelta !== 0) {
+      return statusDelta;
+    }
+    return left.label.localeCompare(right.label);
+  });
+
+  const lines = [
+    yamlFrontmatter({
+      pcg_type: "review_queue",
+      pcg_id: "review_queue",
+      pcg_source: "personal-context-graph",
+      pcg_managed: true,
+      pcg_review_format: "inbox_v1",
+      pcg_review_item_count: sortedItems.length
+    }),
+    "# Review Queue",
+    "",
+    "Review inferred self-model candidates before they become canonical memory. Change each item status to `approved` or `rejected`; leave uncertain items as `pending`.",
+    ""
+  ];
+
+  if (sortedItems.length === 0) {
+    lines.push("No review items.");
+    return lines.join("\n");
+  }
+
+  for (const status of ["pending", "rejected"] as const) {
+    const statusItems = sortedItems.filter((item) => item.status === status);
+    if (statusItems.length === 0) {
+      continue;
+    }
+
+    lines.push(`## ${capitalize(status)}`);
+    lines.push("");
+    for (const item of statusItems) {
+      lines.push(...renderReviewQueueInboxItem(item));
+      lines.push("");
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function renderReviewQueueInboxItem(item: ReviewQueueItem): string[] {
+  return [
+    `### Review: ${item.label}`,
+    `- **ID**: \`${item.id}\``,
+    `- **Status**: \`${item.status}\``,
+    `- **Target type**: \`${item.type}\``,
+    `- **Confidence**: ${round(item.confidence)}`,
+    item.lastSeen ? `- **Last seen**: ${item.lastSeen}` : undefined,
+    item.stability ? `- **Stability**: \`${item.stability}\`` : undefined,
+    item.inferenceLevel ? `- **Inference level**: \`${item.inferenceLevel}\`` : undefined,
+    item.aliases.length > 0 ? `- **Aliases**: ${item.aliases.join("; ")}` : undefined,
+    item.appliesTo && item.appliesTo.length > 0
+      ? `- **Applies to**: ${item.appliesTo.join("; ")}`
+      : undefined,
+    item.sourceIds.length > 0 ? `- **Source IDs**: ${item.sourceIds.join("; ")}` : undefined,
+    "",
+    "#### Summary",
+    item.summary,
+    "",
+    item.agentInstruction ? "#### Agent Instruction" : undefined,
+    item.agentInstruction || undefined,
+    item.agentInstruction ? "" : undefined,
+    "#### Evidence",
+    renderEvidenceList(item.evidence)
+  ].filter((line): line is string => line !== undefined);
+}
+
+function reviewStatusRank(status: ReviewQueueItem["status"]): number {
+  return {
+    pending: 0,
+    rejected: 1,
+    approved: 2
+  }[status];
+}
+
+function capitalize(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 function renderReviewQueueNote(item: ReviewQueueItem): string {
   const sourceLinks = item.evidence.map((evidence) => evidence.sourcePath);
   return [
@@ -476,7 +558,7 @@ function buildAgentContextSectionDrafts(
 }
 
 function renderAgentContextReadme(
-  settings: Pick<PersonalContextGraphSettings, "outputFolder">
+  settings: Pick<PersonalContextGraphSettings, "outputFolder" | "linkAgentContextToGraph">
 ): string {
   const lines = [
     yamlFrontmatter({
@@ -494,7 +576,9 @@ function renderAgentContextReadme(
 
   for (const section of AGENT_CONTEXT_SECTIONS) {
     const sectionPath = joinVaultPath(settings.outputFolder, "Agent Context", section.fileName);
-    lines.push(`- ${wikiLink(sectionPath, section.title)} — ${section.description}`);
+    lines.push(
+      `- ${formatReference(sectionPath, section.title, settings.linkAgentContextToGraph)} — ${section.description}`
+    );
   }
 
   return lines.join("\n");
@@ -522,7 +606,7 @@ function renderAgentContextSection(
   if (section.type === "identity") {
     const identityPath = buildIdentityPath(settings);
     lines.push(`## Identity Card`);
-    lines.push(`${wikiLink(identityPath, "_Me")} — your protected identity card. Edit there to teach agents who you are.`);
+    lines.push(`${formatReference(identityPath, "_Me", settings.linkAgentContextToGraph)} — your protected identity card. Edit there to teach agents who you are.`);
     lines.push("");
     return lines.join("\n");
   }
@@ -541,7 +625,7 @@ function renderAgentContextSection(
 
     for (const input of sortedInputs) {
       const path = graph.sourcePathsById[input.conversation.sourceId];
-      const label = wikiLink(path, input.conversation.title);
+      const label = formatReference(path, input.conversation.title, settings.linkAgentContextToGraph);
       const dateMarker = formatDateMarker(latestInputDate(input));
       lines.push(`- ${label}${dateMarker}: ${input.extraction.summary}`);
     }
@@ -578,7 +662,7 @@ function renderAgentContextSection(
 
   for (const node of nodes) {
     const dateMarker = formatDateMarker(node.lastSeen);
-    lines.push(`### ${wikiLink(node.path, node.label)}${dateMarker}`);
+    lines.push(`### ${formatReference(node.path, node.label, settings.linkAgentContextToGraph)}${dateMarker}`);
     if (node.summary) {
       lines.push(node.summary);
     }
@@ -591,7 +675,7 @@ function renderAgentContextSection(
       lines.push(`**Applies to:** ${node.appliesTo.join(", ")}`);
     }
     const relatedLinks = graph.nodeLinksById[node.id] || {};
-    const relatedRendered = renderTypedLinks(relatedLinks);
+    const relatedRendered = renderTypedLinks(relatedLinks, settings.linkAgentContextToGraph);
     if (relatedRendered && !/No high-confidence/.test(relatedRendered)) {
       lines.push("");
       lines.push("**Related:**");
@@ -689,7 +773,8 @@ function renderTopNodes(nodes: GraphNode[], useWikiLinks: boolean): string {
 }
 
 function renderTypedLinks(
-  linksByType: Partial<Record<ContextNodeType, GraphNode[]>>
+  linksByType: Partial<Record<ContextNodeType, GraphNode[]>>,
+  useWikiLinks = true
 ): string {
   const lines = CONTEXT_NODE_TYPES.map((type) => {
     const links = linksByType[type] || [];
@@ -698,7 +783,7 @@ function renderTypedLinks(
     }
 
     return `- ${CONTEXT_NODE_PLURAL_LABEL[type]}: ${links
-      .map((node) => wikiLink(node.path, node.label))
+      .map((node) => formatReference(node.path, node.label, useWikiLinks))
       .join(", ")}`;
   }).filter(Boolean);
 
@@ -844,6 +929,10 @@ function yamlScalar(value: unknown): string {
 
 function wikiLink(path: string, label: string): string {
   return `[[${path.replace(/\.md$/i, "")}|${label.replace(/\|/g, "-")}]]`;
+}
+
+function formatReference(path: string, label: string, useWikiLinks: boolean): string {
+  return useWikiLinks ? wikiLink(path, label) : `${label} (${path})`;
 }
 
 function frontmatterKeyForType(type: ContextNodeType): string {

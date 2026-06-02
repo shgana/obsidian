@@ -1,4 +1,8 @@
-import { parseManagedCanonicalSeed, parseManagedReviewSeed } from "../src/canonicalIndex";
+import {
+  parseManagedCanonicalSeed,
+  parseManagedReviewSeed,
+  parseManagedReviewSeeds
+} from "../src/canonicalIndex";
 
 describe("canonical index", () => {
   it("parses managed canonical notes into seeds", () => {
@@ -97,5 +101,66 @@ describe("canonical index", () => {
     expect(seed?.inferenceLevel).toBe("supported_inference");
     expect(seed?.appliesTo).toEqual(["product design"]);
     expect(seed?.evidence[0].sourceId).toBe("conv-ux");
+  });
+
+  it("parses a single Review Queue inbox into multiple review seeds", () => {
+    const seeds = parseManagedReviewSeeds(
+      "Context Graph/Review Queue.md",
+      [
+        "---",
+        'pcg_type: "review_queue"',
+        "pcg_managed: true",
+        'pcg_review_format: "inbox_v1"',
+        "---",
+        "# Review Queue",
+        "",
+        "## Pending",
+        "",
+        "### Review: Reference-driven UX design",
+        "- **ID**: `review_pattern_reference-driven-ux-design`",
+        "- **Status**: `approved`",
+        "- **Target type**: `pattern`",
+        "- **Confidence**: 0.78",
+        "- **Stability**: `recurring`",
+        "- **Inference level**: `supported_inference`",
+        "- **Applies to**: product design; onboarding",
+        "- **Source IDs**: conv-ux",
+        "",
+        "#### Summary",
+        "The user draws UX mechanics from proven consumer apps.",
+        "",
+        "#### Agent Instruction",
+        "Translate proven app mechanics into concrete flow decisions.",
+        "",
+        "#### Evidence",
+        '- UX references (Context Graph/Sources/ChatGPT/UX references.md) (0.78): "I like Duolingo onboarding."',
+        "",
+        "### Review: Broad outcome bullets",
+        "- **ID**: `review_preference_broad-outcome-bullets`",
+        "- **Status**: `rejected`",
+        "- **Target type**: `preference`",
+        "- **Confidence**: 0.74",
+        "",
+        "#### Summary",
+        "The user prefers broad outcome bullets.",
+        "",
+        "#### Evidence",
+        '- Pitch copy (Context Graph/Sources/ChatGPT/Pitch copy.md) (0.74): "make these bullets broader."'
+      ].join("\n"),
+      {
+        "Context Graph/Sources/ChatGPT/UX references": "conv-ux",
+        "Context Graph/Sources/ChatGPT/Pitch copy": "conv-pitch"
+      }
+    );
+
+    expect(seeds).toHaveLength(2);
+    expect(seeds[0].status).toBe("approved");
+    expect(seeds[0].type).toBe("pattern");
+    expect(seeds[0].appliesTo).toEqual(["product design", "onboarding"]);
+    expect(seeds[0].agentInstruction).toBe("Translate proven app mechanics into concrete flow decisions.");
+    expect(seeds[0].evidence[0].sourceId).toBe("conv-ux");
+    expect(seeds[1].status).toBe("rejected");
+    expect(seeds[1].type).toBe("preference");
+    expect(seeds[1].evidence[0].sourceId).toBe("conv-pitch");
   });
 });

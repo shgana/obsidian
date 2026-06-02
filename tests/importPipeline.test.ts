@@ -74,8 +74,37 @@ describe("import pipeline", () => {
     );
 
     expect(readme?.content).toContain("Sectioned retrieval surface");
-    expect(identitySection?.content).toContain("[[Context Graph/Entities/_Me|_Me]]");
+    expect(readme?.content).not.toContain("[[");
+    expect(identitySection?.content).toContain("_Me (Context Graph/Entities/_Me.md)");
     expect(topicsSection?.content).toContain("Obsidian");
+    expect(topicsSection?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(topicsSection?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+  });
+
+  it("can explicitly link sectioned Agent Context into the graph", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph",
+      minimumCanonicalSources: 1,
+      linkAgentContextToGraph: true
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-sect-links", "Section link test")],
+      settings,
+      mockProvider
+    );
+
+    const readme = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context/README.md"
+    );
+    const topicsSection = artifacts.drafts.find(
+      (draft) => draft.path.endsWith("Agent Context/08 Recent Topics.md")
+    );
+
+    expect(readme?.content).toContain("[[Context Graph/Agent Context/01 Agent Instructions|Agent Instructions]]");
     expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
   });
 
@@ -143,10 +172,36 @@ describe("import pipeline", () => {
     const topicsSection = artifacts.drafts.find(
       (draft) => draft.path === "Context Graph/Agent Context/08 Recent Topics.md"
     );
-    expect(topicsSection?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+    expect(topicsSection?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Review Queue.md")).toBe(true);
     expect(artifacts.report.agentContextPath).toBe("Context Graph/Agent Context/README.md");
     expect(artifacts.checkpoint.sourceManifest).toHaveLength(1);
     expect("conversations" in artifacts.checkpoint).toBe(false);
+  });
+
+  it("renders review candidates into a single Review Queue inbox note", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph"
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-review-inbox", "Review inbox test")],
+      settings,
+      reviewQueueProvider
+    );
+
+    const reviewDrafts = artifacts.drafts.filter((draft) => draft.path.includes("Review Queue"));
+    const inbox = artifacts.drafts.find((draft) => draft.path === "Context Graph/Review Queue.md");
+
+    expect(reviewDrafts).toHaveLength(1);
+    expect(inbox?.content).toContain('pcg_type: "review_queue"');
+    expect(inbox?.content).toContain("### Review: Reference-driven UX design");
+    expect(inbox?.content).toContain("- **Status**: `pending`");
+    expect(inbox?.content).not.toContain("[[");
+    expect(artifacts.report.reviewQueueItemCount).toBe(1);
   });
 
   it("still emits a legacy Agent Context.md when sectioned mode is disabled", async () => {
@@ -276,6 +331,42 @@ const selfModelProvider: AIProvider = {
               quote: "Build this as an Obsidian plugin.",
               turnRole: "user",
               confidence: 0.96
+            }
+          ]
+        }
+      ]
+    };
+  }
+};
+
+const reviewQueueProvider: AIProvider = {
+  ...mockProvider,
+  async extractContext(conversation): Promise<ExtractedContext> {
+    const extraction = await mockProvider.extractContext(conversation);
+    return {
+      ...extraction,
+      topics: [],
+      confidence: 0.8
+    };
+  },
+  async extractSelfModel(): Promise<Partial<ExtractedContext>> {
+    return {
+      summary: "The user uses proven consumer apps as UX references.",
+      confidence: 0.8,
+      patterns: [
+        {
+          label: "Reference-driven UX design",
+          summary: "The user draws UX mechanics from proven consumer apps.",
+          confidence: 0.78,
+          stability: "recurring",
+          inferenceLevel: "supported_inference",
+          appliesTo: ["product design", "onboarding"],
+          agentInstruction: "Translate proven app mechanics into concrete flow decisions.",
+          evidence: [
+            {
+              quote: "I like Duolingo's lesson-first onboarding better.",
+              turnRole: "user",
+              confidence: 0.78
             }
           ]
         }

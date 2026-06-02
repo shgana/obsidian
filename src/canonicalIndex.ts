@@ -50,9 +50,9 @@ export async function loadCanonicalContextState(
   const nodeSeeds = managedFiles
     .map((file) => managedFileToSeed(file, sourceIdByPath))
     .filter((seed): seed is CanonicalNodeSeed => Boolean(seed));
-  const reviewSeeds = managedFiles
-    .map((file) => managedFileToReviewSeed(file, sourceIdByPath))
-    .filter((seed): seed is ReviewQueueSeed => Boolean(seed));
+  const reviewSeeds = managedFiles.flatMap((file) =>
+    managedFileToReviewSeeds(file, sourceIdByPath)
+  );
 
   return {
     nodeSeeds,
@@ -80,7 +80,15 @@ export function parseManagedReviewSeed(
   content: string,
   sourceIdByPath: Record<string, string> = {}
 ): ReviewQueueSeed | undefined {
-  return managedFileToReviewSeed(
+  return parseManagedReviewSeeds(path, content, sourceIdByPath)[0];
+}
+
+export function parseManagedReviewSeeds(
+  path: string,
+  content: string,
+  sourceIdByPath: Record<string, string> = {}
+): ReviewQueueSeed[] {
+  return managedFileToReviewSeeds(
     {
       path,
       content,
@@ -145,18 +153,26 @@ function managedFileToSeed(
   };
 }
 
-function managedFileToReviewSeed(
+function managedFileToReviewSeeds(
   file: ParsedManagedFile,
   sourceIdByPath: Record<string, string>
-): ReviewQueueSeed | undefined {
-  if (file.frontmatter.pcg_type !== "review_item" || file.frontmatter.pcg_managed !== true) {
-    return undefined;
+): ReviewQueueSeed[] {
+  if (file.frontmatter.pcg_managed !== true) {
+    return [];
+  }
+
+  if (file.frontmatter.pcg_type === "review_queue") {
+    return parseReviewQueueInbox(file, sourceIdByPath);
+  }
+
+  if (file.frontmatter.pcg_type !== "review_item") {
+    return [];
   }
 
   const type = asContextNodeType(file.frontmatter.pcg_target_type);
   const status = asReviewStatus(file.frontmatter.pcg_review_status);
   if (!type || !status) {
-    return undefined;
+    return [];
   }
 
   const label = extractReviewLabel(file.content) || basenameWithoutMarkdown(file.path);
@@ -166,7 +182,7 @@ function managedFileToReviewSeed(
     ...evidence.map((entry) => entry.sourceId)
   ]);
 
-  return {
+  return [{
     type,
     id: asString(file.frontmatter.pcg_id) || `review_${type}_${slugify(label)}`,
     label,
@@ -183,6 +199,57 @@ function managedFileToReviewSeed(
     appliesTo: asStringArray(file.frontmatter.pcg_applies_to),
     agentInstruction: asString(file.frontmatter.pcg_agent_instruction),
     status
+  }];
+}
+
+function parseReviewQueueInbox(
+  file: ParsedManagedFile,
+  sourceIdByPath: Record<string, string>
+): ReviewQueueSeed[] {
+  const blocks = file.content
+    .split(/(?=^###\s+Review:\s+)/m)
+    .filter((block) => /^###\s+Review:\s+/m.test(block));
+
+  return blocks
+    .map((block) => parseReviewQueueInboxBlock(file.path, block, sourceIdByPath))
+    .filter((seed): seed is ReviewQueueSeed => Boolean(seed));
+}
+
+function parseReviewQueueInboxBlock(
+  path: string,
+  block: string,
+  sourceIdByPath: Record<string, string>
+): ReviewQueueSeed | undefined {
+  const label = /^###\s+Review:\s+(.+)$/m.exec(block)?.[1]?.trim();
+  const type = asContextNodeType(readReviewField(block, "Target type"));
+  const status = asReviewStatus(readReviewField(block, "Status"));
+  if (!label || !type || !status) {
+    return undefined;
+  }
+
+  const evidence = parseEvidenceSection(extractSubsection(block, "Evidence"), sourceIdByPath);
+  const sourceIds = uniqueStrings([
+    ...splitReviewList(readReviewField(block, "Source IDs")),
+    ...evidence.map((entry) => entry.sourceId)
+  ]);
+
+  return {
+    type,
+    id: readReviewField(block, "ID") || `review_${type}_${slugify(label)}`,
+    label,
+    slug: slugify(label),
+    aliases: splitReviewList(readReviewField(block, "Aliases")),
+    path,
+    summary: extractSubsection(block, "Summary") || "",
+    confidence: asNumber(parseScalar(readReviewField(block, "Confidence")), 0),
+    evidence,
+    sourceIds,
+    lastSeen: readReviewField(block, "Last seen"),
+    stability: asStability(readReviewField(block, "Stability")),
+    inferenceLevel: asInferenceLevel(readReviewField(block, "Inference level")),
+    appliesTo: splitReviewList(readReviewField(block, "Applies to")),
+    agentInstruction: extractSubsection(block, "Agent Instruction") || "",
+    status
   };
 }
 
@@ -191,6 +258,13 @@ function parseEvidence(
   sourceIdByPath: Record<string, string>
 ): NodeEvidence[] {
   const section = extractSection(content, "Evidence");
+  return parseEvidenceSection(section, sourceIdByPath);
+}
+
+function parseEvidenceSection(
+  section: string | undefined,
+  sourceIdByPath: Record<string, string>
+): NodeEvidence[] {
   if (!section || /No evidence captured/i.test(section)) {
     return [];
   }
@@ -215,6 +289,37 @@ function parseEvidence(
   }
 
   return evidence;
+}
+
+function readReviewField(block: string, field: string): string {
+  const match = new RegExp(`^- \\*\\*${escapeRegExp(field)}\\*\\*:\\s+(.+)$`, "m").exec(block);
+  if (!match) {
+    return "";
+  }
+
+  return match[1].trim().replace(/^`|`$/g, "");
+}
+
+function splitReviewList(value: string): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function extractSubsection(content: string, heading: string): string | undefined {
+  const headingMatch = new RegExp(`^####\\s+${escapeRegExp(heading)}\\s*$`, "m").exec(content);
+  if (!headingMatch) {
+    return undefined;
+  }
+
+  const rest = content.slice(headingMatch.index + headingMatch[0].length).replace(/^\n/, "");
+  const nextHeading = /^####\s+|^###\s+/m.exec(rest);
+  return (nextHeading ? rest.slice(0, nextHeading.index) : rest).trim();
 }
 
 function parseEvidenceLine(

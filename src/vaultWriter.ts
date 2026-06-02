@@ -99,7 +99,11 @@ export class ManagedVaultWriter {
 
     for (const file of files) {
       const content = await this.vault.read(file);
-      if (!isManagedContent(content) || isProtectedContent(content)) {
+      if (!isManagedContent(content)) {
+        continue;
+      }
+
+      if (isProtectedContent(content) && !isMigratedReviewItemContent(content)) {
         continue;
       }
 
@@ -117,10 +121,55 @@ function parentPath(path: string): string {
   return parts.join("/");
 }
 
-function isManagedContent(content: string): boolean {
-  return /^---\n[\s\S]*?\npcg_managed: true\n[\s\S]*?\n---/.test(content);
+export function isManagedContent(content: string): boolean {
+  return readFrontmatterBoolean(content, "pcg_managed");
 }
 
-function isProtectedContent(content: string): boolean {
-  return /^---\n[\s\S]*?\npcg_protected: true\n[\s\S]*?\n---/.test(content);
+export function isProtectedContent(content: string): boolean {
+  return readFrontmatterBoolean(content, "pcg_protected");
+}
+
+function readFrontmatterBoolean(content: string, key: string): boolean {
+  return readFrontmatterValue(content, key).toLowerCase() === "true";
+}
+
+function isMigratedReviewItemContent(content: string): boolean {
+  return readFrontmatterValue(content, "pcg_type") === "review_item";
+}
+
+function readFrontmatterValue(content: string, key: string): string {
+  const frontmatter = extractOpeningFrontmatter(content);
+  if (!frontmatter) {
+    return "";
+  }
+
+  const keyPattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*:\\s*(.*?)\\s*$`);
+  for (const line of frontmatter.split(/\r?\n/)) {
+    const match = line.match(keyPattern);
+    if (!match) {
+      continue;
+    }
+
+    return parseFrontmatterScalar(match[1]);
+  }
+
+  return "";
+}
+
+function extractOpeningFrontmatter(content: string): string | null {
+  const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  const match = normalized.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+  return match?.[1] ?? null;
+}
+
+function parseFrontmatterScalar(value: string): string {
+  const trimmed = value.trim();
+  const withoutComment = trimmed.startsWith("\"") || trimmed.startsWith("'")
+    ? trimmed
+    : trimmed.replace(/\s+#.*$/, "");
+  return withoutComment.replace(/^["'](.*)["']$/, "$1");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -14,7 +14,8 @@ import {
   type GraphNode,
   type NodeEvidence,
   type ReviewQueueItem,
-  type ReviewQueueSeed
+  type ReviewQueueSeed,
+  type ReviewStatus
 } from "./types";
 import { cosineSimilarity, hashString, sanitizeFileName, slugify, uniqueBy } from "./text";
 
@@ -85,6 +86,7 @@ interface MatchRegistry {
 
 interface ReviewRegistry {
   approvedSeeds: CanonicalNodeSeed[];
+  retainedItems: ReviewQueueItem[];
   rejectedKeys: Set<string>;
   pendingKeys: Set<string>;
 }
@@ -121,6 +123,7 @@ function normalizeCanonicalState(
 
 function buildReviewRegistry(reviewSeeds: ReviewQueueSeed[]): ReviewRegistry {
   const approvedSeeds: CanonicalNodeSeed[] = [];
+  const retainedItems: ReviewQueueItem[] = [];
   const rejectedKeys = new Set<string>();
   const pendingKeys = new Set<string>();
 
@@ -139,10 +142,12 @@ function buildReviewRegistry(reviewSeeds: ReviewQueueSeed[]): ReviewRegistry {
         pendingKeys.add(key);
       }
     }
+    retainedItems.push(reviewSeedToReviewQueueItem(seed));
   }
 
   return {
     approvedSeeds,
+    retainedItems,
     rejectedKeys,
     pendingKeys
   };
@@ -168,6 +173,27 @@ function reviewSeedToCanonicalSeed(seed: ReviewQueueSeed): CanonicalNodeSeed {
   };
 }
 
+function reviewSeedToReviewQueueItem(seed: ReviewQueueSeed): ReviewQueueItem {
+  return {
+    type: seed.type,
+    id: seed.id,
+    label: seed.label,
+    slug: seed.slug || slugify(seed.label),
+    aliases: seed.aliases,
+    path: seed.path,
+    summary: seed.summary,
+    confidence: seed.confidence,
+    evidence: seed.evidence,
+    sourceIds: seed.sourceIds,
+    lastSeen: seed.lastSeen,
+    stability: seed.stability,
+    inferenceLevel: seed.inferenceLevel,
+    appliesTo: seed.appliesTo,
+    agentInstruction: seed.agentInstruction,
+    status: seed.status
+  };
+}
+
 export async function buildContextGraph(
   inputs: ConversationExtraction[],
   settings: PersonalContextGraphSettings,
@@ -179,7 +205,7 @@ export async function buildContextGraph(
   const graph: BuiltContextGraph = {
     nodes: [],
     edges: [],
-    reviewQueueItems: [],
+    reviewQueueItems: [...reviewRegistry.retainedItems],
     sourcePathsById: {},
     sourceLinksById: {},
     nodeLinksById: {},
@@ -345,7 +371,6 @@ export async function buildContextGraph(
       indexNode(node, registry.nodeIndex);
     } else if (isReviewableSelfModelCluster(cluster, reviewRegistry)) {
       graph.reviewQueueItems.push(createReviewQueueItem(cluster, settings.outputFolder));
-      graph.stats.reviewQueueItems += 1;
       graph.stats.sourceOnlyCandidates += cluster.candidates.length;
       graph.stats.demotedCandidates += cluster.candidates.length;
     } else {
@@ -372,7 +397,15 @@ export async function buildContextGraph(
   finalizeGraphStats(graph, registry);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
-  graph.reviewQueueItems.sort((left, right) => left.path.localeCompare(right.path));
+  graph.reviewQueueItems = compactReviewQueueItems(graph.reviewQueueItems);
+  graph.stats.reviewQueueItems = graph.reviewQueueItems.length;
+  graph.reviewQueueItems.sort((left, right) => {
+    const statusDelta = reviewStatusRank(left.status) - reviewStatusRank(right.status);
+    if (statusDelta !== 0) {
+      return statusDelta;
+    }
+    return left.label.localeCompare(right.label);
+  });
   return graph;
 }
 
@@ -985,11 +1018,7 @@ function createReviewQueueItem(
         .map((candidate) => candidate.item.label)
         .filter((value) => slugify(value) !== slug)
     ).slice(0, 8),
-    path: joinVaultPath(
-      outputFolder,
-      "Review Queue",
-      `${sanitizeFileName(`${cluster.type} - ${label}`)}.md`
-    ),
+    path: buildReviewQueuePath(outputFolder),
     summary: representative.item.summary,
     confidence: representative.item.confidence,
     evidence,
@@ -1004,6 +1033,52 @@ function createReviewQueueItem(
     agentInstruction: representative.item.agentInstruction,
     status: "pending"
   };
+}
+
+export function buildReviewQueuePath(outputFolder: string): string {
+  return joinVaultPath(outputFolder, "Review Queue.md");
+}
+
+function compactReviewQueueItems(items: ReviewQueueItem[]): ReviewQueueItem[] {
+  const byKey = new Map<string, ReviewQueueItem>();
+
+  for (const item of items) {
+    const key = reviewKeys(item.type, item.label, item.aliases, item.summary)[0] ||
+      `${item.type}:${slugify(item.label)}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...item });
+      continue;
+    }
+
+    const preferred = reviewStatusRank(item.status) < reviewStatusRank(existing.status) ||
+      item.confidence > existing.confidence
+      ? item
+      : existing;
+    byKey.set(key, {
+      ...preferred,
+      aliases: uniqueStrings([...existing.aliases, ...item.aliases]).slice(0, 12),
+      evidence: uniqueBy(
+        [...existing.evidence, ...item.evidence],
+        (entry) => `${entry.sourceId}:${entry.quote}`
+      )
+        .sort((left, right) => right.confidence - left.confidence)
+        .slice(0, 12),
+      sourceIds: uniqueStrings([...existing.sourceIds, ...item.sourceIds]),
+      lastSeen: maxStringDate(existing.lastSeen, item.lastSeen),
+      appliesTo: uniqueStrings([...(existing.appliesTo || []), ...(item.appliesTo || [])])
+    });
+  }
+
+  return [...byKey.values()];
+}
+
+function reviewStatusRank(status: ReviewStatus): number {
+  return {
+    pending: 0,
+    rejected: 1,
+    approved: 2
+  }[status];
 }
 
 function collectSourceAnchorCandidates(

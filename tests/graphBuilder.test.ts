@@ -824,6 +824,7 @@ describe("context graph builder", () => {
     expect(graph.nodes.filter((node) => node.type === "pattern")).toHaveLength(0);
     expect(graph.reviewQueueItems).toHaveLength(1);
     expect(graph.reviewQueueItems[0].label).toBe("Reference-driven UX design");
+    expect(graph.reviewQueueItems[0].path).toBe("Context Graph/Review Queue.md");
     expect(graph.reviewQueueItems[0].status).toBe("pending");
   });
 
@@ -882,7 +883,8 @@ describe("context graph builder", () => {
     );
 
     expect(rejectedGraph.nodes.filter((node) => node.type === "pattern")).toHaveLength(0);
-    expect(rejectedGraph.reviewQueueItems).toHaveLength(0);
+    expect(rejectedGraph.reviewQueueItems).toHaveLength(1);
+    expect(rejectedGraph.reviewQueueItems[0].status).toBe("rejected");
     expect(rejectedGraph.stats.suppressedReviewItems).toBe(1);
   });
 
@@ -953,7 +955,7 @@ function reviewSeed(
     label,
     slug: label.toLowerCase().replace(/\s+/g, "-"),
     aliases: [],
-    path: `Context Graph/Review Queue/${type} - ${label}.md`,
+    path: "Context Graph/Review Queue.md",
     summary: `${label} summary.`,
     confidence: 0.78,
     evidence: [
