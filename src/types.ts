@@ -268,6 +268,33 @@ export interface ImportPreview {
   estimatedCostUsd: number;
 }
 
+export type ImportRunStatus = "idle" | "running" | "succeeded" | "failed" | "cancelled";
+
+export type ImportRunPhase =
+  | "idle"
+  | "parsing_zip"
+  | "preview_ready"
+  | "confirmed"
+  | "extracting"
+  | "building_graph"
+  | "rendering_markdown"
+  | "writing_vault"
+  | "saving_checkpoint"
+  | "completed"
+  | "failed";
+
+export interface ImportRunState {
+  lastImportStartedAt?: string;
+  lastImportCompletedAt?: string;
+  lastImportPhase?: ImportRunPhase;
+  lastImportStatus?: ImportRunStatus;
+  lastImportError?: string;
+  lastImportErrorAt?: string;
+  lastImportFileName?: string;
+  lastImportSelectedConversations?: number;
+  lastImportTotalConversations?: number;
+}
+
 export interface GraphBuildReport {
   importedConversationCount: number;
   processedConversationCount: number;

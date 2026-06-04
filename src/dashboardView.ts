@@ -1,10 +1,11 @@
 import { ItemView, Setting, type WorkspaceLeaf } from "obsidian";
-import type { GraphBuildReport, ImportCheckpoint } from "./types";
+import type { GraphBuildReport, ImportCheckpoint, ImportRunState } from "./types";
 
 export const VIEW_TYPE_CONTEXT_GRAPH_DASHBOARD = "personal-context-graph-dashboard";
 
 export interface DashboardHost {
   checkpoint?: ImportCheckpoint;
+  importRunState?: ImportRunState;
   openImportModal(): void;
   rebuildGeneratedGraph(): Promise<void>;
   exportAgentContextPack(): Promise<void>;
@@ -49,6 +50,8 @@ export class ContextGraphDashboardView extends ItemView {
           .onClick(() => void this.host.exportAgentContextPack())
       );
 
+    renderImportStatus(container, this.host.importRunState, this.host.checkpoint);
+
     const report = this.host.checkpoint?.report;
     if (!report) {
       container.createEl("p", {
@@ -59,6 +62,84 @@ export class ContextGraphDashboardView extends ItemView {
 
     renderReport(container, report);
   }
+}
+
+export function renderImportStatus(
+  container: HTMLElement,
+  state: ImportRunState | undefined,
+  checkpoint?: ImportCheckpoint
+): void {
+  container.createEl("h3", { text: "Import Status" });
+
+  if (!state || Object.keys(state).length === 0) {
+    container.createEl("p", {
+      text: "No import attempt recorded."
+    });
+    return;
+  }
+
+  const list = container.createEl("ul");
+  list.createEl("li", {
+    text: `Status: ${state.lastImportStatus || "unknown"}`
+  });
+  list.createEl("li", {
+    text: `Phase: ${state.lastImportPhase || "unknown"}`
+  });
+  if (state.lastImportFileName) {
+    list.createEl("li", {
+      text: `File: ${state.lastImportFileName}`
+    });
+  }
+  if (state.lastImportSelectedConversations !== undefined || state.lastImportTotalConversations !== undefined) {
+    list.createEl("li", {
+      text: `Conversations: ${state.lastImportSelectedConversations ?? "?"} selected of ${state.lastImportTotalConversations ?? "?"}`
+    });
+  }
+  if (state.lastImportStartedAt) {
+    list.createEl("li", {
+      text: `Started: ${state.lastImportStartedAt}`
+    });
+  }
+  if (state.lastImportCompletedAt) {
+    list.createEl("li", {
+      text: `Completed: ${state.lastImportCompletedAt}`
+    });
+  }
+  if (state.lastImportError) {
+    list.createEl("li", {
+      text: `Last error: ${state.lastImportError}`
+    });
+  }
+  if (state.lastImportErrorAt) {
+    list.createEl("li", {
+      text: `Error recorded: ${state.lastImportErrorAt}`
+    });
+  }
+
+  if (isCheckpointStaleAfterAttempt(state, checkpoint)) {
+    container.createEl("p", {
+      text: "Warning: the latest import attempt is newer than the saved checkpoint. The generated graph may still reflect an older successful import."
+    });
+  }
+}
+
+function isCheckpointStaleAfterAttempt(
+  state: ImportRunState,
+  checkpoint?: ImportCheckpoint
+): boolean {
+  if (state.lastImportStatus !== "failed" && state.lastImportStatus !== "running") {
+    return false;
+  }
+
+  if (!state.lastImportStartedAt) {
+    return false;
+  }
+
+  if (!checkpoint?.createdAt) {
+    return true;
+  }
+
+  return checkpoint.createdAt < state.lastImportStartedAt;
 }
 
 function renderReport(container: HTMLElement, report: GraphBuildReport): void {

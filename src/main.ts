@@ -14,17 +14,27 @@ import { ImportConsentModal, ProgressModal, ZipImportModal } from "./modals";
 import { DEFAULT_SETTINGS, type PersonalContextGraphSettings } from "./settings";
 import { PersonalContextGraphSettingTab } from "./settingsTab";
 import { parseChatGptExportZip } from "./chatgptParser";
-import type { ImportCheckpoint, ParsedConversation } from "./types";
+import { migrateImportRunState, sanitizeImportErrorMessage } from "./importRunState";
+import type {
+  GraphBuildReport,
+  ImportPreview,
+  ImportRunPhase,
+  ImportRunState,
+  ImportCheckpoint,
+  ParsedConversation
+} from "./types";
 import { ManagedVaultWriter } from "./vaultWriter";
 
 interface StoredPluginData {
   settings?: Partial<PersonalContextGraphSettings>;
   checkpoint?: ImportCheckpoint | Record<string, unknown>;
+  importRunState?: ImportRunState | Record<string, unknown>;
 }
 
 export default class PersonalContextGraphPlugin extends Plugin {
   settings: PersonalContextGraphSettings = { ...DEFAULT_SETTINGS };
   checkpoint?: ImportCheckpoint;
+  importRunState: ImportRunState = {};
 
   async onload(): Promise<void> {
     await this.loadPluginData();
@@ -69,6 +79,9 @@ export default class PersonalContextGraphPlugin extends Plugin {
     const settings = isStoredPluginData(data) ? data.settings : data;
     this.settings = migrateSettings(settings || {});
     this.checkpoint = isStoredPluginData(data) ? migrateCheckpoint(data.checkpoint) : undefined;
+    this.importRunState = isStoredPluginData(data)
+      ? migrateImportRunState(data.importRunState)
+      : {};
   }
 
   async saveSettings(): Promise<void> {
@@ -78,7 +91,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
   async savePluginData(): Promise<void> {
     await this.saveData({
       settings: settingsForStorage(this.settings),
-      checkpoint: this.checkpoint
+      checkpoint: this.checkpoint,
+      importRunState: this.importRunState
     } satisfies StoredPluginData);
   }
 
@@ -92,38 +106,96 @@ export default class PersonalContextGraphPlugin extends Plugin {
   }
 
   async importZipFile(file: File): Promise<void> {
+    await this.updateImportRunState({
+      lastImportStartedAt: new Date().toISOString(),
+      lastImportCompletedAt: undefined,
+      lastImportPhase: "parsing_zip",
+      lastImportStatus: "running",
+      lastImportError: undefined,
+      lastImportErrorAt: undefined,
+      lastImportFileName: file.name,
+      lastImportSelectedConversations: undefined,
+      lastImportTotalConversations: undefined
+    });
+
     try {
       const conversations = await parseChatGptExportZip(await file.arrayBuffer());
       if (conversations.length === 0) {
+        await this.markImportFailed(
+          new Error("No non-empty conversations found in conversations.json."),
+          "parsing_zip"
+        );
         new Notice("No non-empty conversations found in conversations.json.");
         return;
       }
 
       const preview = createImportPreview(file.name, conversations, this.settings);
-      new ImportConsentModal(this.app, preview, this.settings, () =>
-        this.executeImport(conversations)
+      await this.updateImportRunState({
+        lastImportPhase: "preview_ready",
+        lastImportStatus: "running",
+        lastImportSelectedConversations: preview.selectedConversations,
+        lastImportTotalConversations: preview.totalConversations
+      });
+      new ImportConsentModal(
+        this.app,
+        preview,
+        this.settings,
+        () => this.executeImport(conversations, preview),
+        () =>
+          this.updateImportRunState({
+            lastImportCompletedAt: new Date().toISOString(),
+            lastImportPhase: "preview_ready",
+            lastImportStatus: "cancelled"
+          })
       ).open();
     } catch (error) {
+      await this.markImportFailed(error, "parsing_zip");
       new Notice(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async executeImport(conversations: ParsedConversation[]): Promise<void> {
+  async executeImport(conversations: ParsedConversation[], preview?: ImportPreview): Promise<void> {
     const progress = new ProgressModal(this.app);
     progress.open();
 
     try {
+      await this.updateImportRunState({
+        lastImportPhase: "confirmed",
+        lastImportStatus: "running",
+        lastImportSelectedConversations: preview?.selectedConversations ?? conversations.length,
+        lastImportTotalConversations: preview?.totalConversations ?? conversations.length
+      });
       const provider = new OpenAIProvider(this.settings);
+      await this.updateImportRunState({
+        lastImportPhase: "extracting",
+        lastImportStatus: "running"
+      });
       const canonicalState = await loadCanonicalContextState(this.app.vault, this.settings);
       const artifacts = await runImport(conversations, this.settings, provider, canonicalState, (status) => {
+        const phase = progressPhaseToImportRunPhase(status.phase);
+        if (this.importRunState.lastImportPhase !== phase) {
+          void this.updateImportRunState({
+            lastImportPhase: phase,
+            lastImportStatus: "running"
+          });
+        }
         progress.update(`${status.message} (${status.completed}/${status.total})`);
       });
       const writer = new ManagedVaultWriter(this.app.vault, this.settings);
+      await this.updateImportRunState({
+        lastImportPhase: "writing_vault",
+        lastImportStatus: "running"
+      });
       const writeSummary = await writer.writeDrafts(artifacts.drafts);
       const report = applyWriteSummary(artifacts.report, writeSummary);
 
+      await this.updateImportRunState({
+        lastImportPhase: "saving_checkpoint",
+        lastImportStatus: "running"
+      });
       artifacts.checkpoint.report = report;
       this.checkpoint = artifacts.checkpoint;
+      this.markImportSucceeded(report);
       await this.savePluginData();
       this.refreshDashboard();
 
@@ -134,6 +206,7 @@ export default class PersonalContextGraphPlugin extends Plugin {
       await this.openVaultFile(report.agentContextPath);
     } catch (error) {
       progress.close();
+      await this.markImportFailed(error, this.importRunState.lastImportPhase || "failed");
       new Notice(error instanceof Error ? error.message : String(error));
     }
   }
@@ -177,6 +250,37 @@ export default class PersonalContextGraphPlugin extends Plugin {
     }
   }
 
+  private async updateImportRunState(patch: Partial<ImportRunState>): Promise<void> {
+    this.importRunState = {
+      ...this.importRunState,
+      ...patch
+    };
+    await this.savePluginData();
+    this.refreshDashboard();
+  }
+
+  private async markImportFailed(error: unknown, phase: ImportRunPhase): Promise<void> {
+    await this.updateImportRunState({
+      lastImportPhase: phase,
+      lastImportStatus: "failed",
+      lastImportError: sanitizeImportErrorMessage(error),
+      lastImportErrorAt: new Date().toISOString()
+    });
+  }
+
+  private markImportSucceeded(report: GraphBuildReport): void {
+    this.importRunState = {
+      ...this.importRunState,
+      lastImportCompletedAt: report.completedAt || new Date().toISOString(),
+      lastImportPhase: "completed",
+      lastImportStatus: "succeeded",
+      lastImportError: undefined,
+      lastImportErrorAt: undefined,
+      lastImportSelectedConversations: report.processedConversationCount,
+      lastImportTotalConversations: report.importedConversationCount
+    };
+  }
+
   private async openVaultFile(path: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
@@ -185,11 +289,23 @@ export default class PersonalContextGraphPlugin extends Plugin {
   }
 }
 
+function progressPhaseToImportRunPhase(phase: "extracting" | "building-graph" | "rendering"): ImportRunPhase {
+  if (phase === "building-graph") {
+    return "building_graph";
+  }
+
+  if (phase === "rendering") {
+    return "rendering_markdown";
+  }
+
+  return "extracting";
+}
+
 function isStoredPluginData(value: unknown): value is StoredPluginData {
   return (
     typeof value === "object" &&
     value !== null &&
-    ("settings" in value || "checkpoint" in value)
+    ("settings" in value || "checkpoint" in value || "importRunState" in value)
   );
 }
 

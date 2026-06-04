@@ -42,7 +42,8 @@ export class ImportConsentModal extends Modal {
     app: App,
     private readonly preview: ImportPreview,
     private readonly settings: PersonalContextGraphSettings,
-    private readonly onConfirm: () => void | Promise<void>
+    private readonly onConfirm: () => void | Promise<void>,
+    private readonly onCancel?: () => void | Promise<void>
   ) {
     super(app);
   }
@@ -91,10 +92,13 @@ export class ImportConsentModal extends Modal {
 
     if (this.settings.costCapUsd > 0 && this.preview.estimatedCostUsd > this.settings.costCapUsd) {
       this.contentEl.createEl("p", {
-        text: "The estimate exceeds your configured cap. Raise the cap or lower the test-run limit before importing."
+      text: "The estimate exceeds your configured cap. Raise the cap or lower the test-run limit before importing."
       });
       new Setting(this.contentEl).addButton((button) =>
-        button.setButtonText("Close").onClick(() => this.close())
+        button.setButtonText("Close").onClick(async () => {
+          this.close();
+          await this.onCancel?.();
+        })
       );
       return;
     }
@@ -103,7 +107,10 @@ export class ImportConsentModal extends Modal {
       .addButton((button) =>
         button
           .setButtonText("Cancel")
-          .onClick(() => this.close())
+          .onClick(async () => {
+            this.close();
+            await this.onCancel?.();
+          })
       )
       .addButton((button) =>
         button
