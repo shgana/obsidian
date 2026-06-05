@@ -1,5 +1,8 @@
 import type { ImportRunState } from "./types";
 
+export const INTERRUPTED_IMPORT_ERROR =
+  "Import was interrupted before completion. Reloading or disabling the plugin stops in-progress imports; rerun the import ZIP.";
+
 export function migrateImportRunState(value: unknown): ImportRunState {
   if (!value || typeof value !== "object") {
     return {};
@@ -8,6 +11,7 @@ export function migrateImportRunState(value: unknown): ImportRunState {
   const state = value as Record<string, unknown>;
   return compactImportRunState({
     lastImportStartedAt: asOptionalString(state.lastImportStartedAt),
+    lastImportUpdatedAt: asOptionalString(state.lastImportUpdatedAt),
     lastImportCompletedAt: asOptionalString(state.lastImportCompletedAt),
     lastImportPhase: asImportRunPhase(state.lastImportPhase),
     lastImportStatus: asImportRunStatus(state.lastImportStatus),
@@ -15,7 +19,28 @@ export function migrateImportRunState(value: unknown): ImportRunState {
     lastImportErrorAt: asOptionalString(state.lastImportErrorAt),
     lastImportFileName: asOptionalString(state.lastImportFileName),
     lastImportSelectedConversations: asOptionalNumber(state.lastImportSelectedConversations),
-    lastImportTotalConversations: asOptionalNumber(state.lastImportTotalConversations)
+    lastImportTotalConversations: asOptionalNumber(state.lastImportTotalConversations),
+    lastImportProgressMessage: asOptionalString(state.lastImportProgressMessage),
+    lastImportProgressCompleted: asOptionalNumber(state.lastImportProgressCompleted),
+    lastImportProgressTotal: asOptionalNumber(state.lastImportProgressTotal)
+  });
+}
+
+export function markInterruptedImportRunState(
+  state: ImportRunState,
+  interruptedAt: string
+): ImportRunState {
+  if (state.lastImportStatus !== "running") {
+    return state;
+  }
+
+  return compactImportRunState({
+    ...state,
+    lastImportUpdatedAt: interruptedAt,
+    lastImportCompletedAt: interruptedAt,
+    lastImportStatus: "failed",
+    lastImportError: INTERRUPTED_IMPORT_ERROR,
+    lastImportErrorAt: interruptedAt
   });
 }
 

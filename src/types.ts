@@ -285,6 +285,7 @@ export type ImportRunPhase =
 
 export interface ImportRunState {
   lastImportStartedAt?: string;
+  lastImportUpdatedAt?: string;
   lastImportCompletedAt?: string;
   lastImportPhase?: ImportRunPhase;
   lastImportStatus?: ImportRunStatus;
@@ -293,6 +294,9 @@ export interface ImportRunState {
   lastImportFileName?: string;
   lastImportSelectedConversations?: number;
   lastImportTotalConversations?: number;
+  lastImportProgressMessage?: string;
+  lastImportProgressCompleted?: number;
+  lastImportProgressTotal?: number;
 }
 
 export interface GraphBuildReport {

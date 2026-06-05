@@ -43,6 +43,8 @@ interface OpenAIEmbeddingBody {
   };
 }
 
+const OPENAI_REQUEST_TIMEOUT_MS = 180_000;
+
 export class OpenAIProvider implements AIProvider {
   constructor(private readonly settings: PersonalContextGraphSettings) {}
 
@@ -51,46 +53,49 @@ export class OpenAIProvider implements AIProvider {
       throw new Error("OpenAI API key is required before importing.");
     }
 
-    const response = await requestUrl({
-      url: "https://api.openai.com/v1/responses",
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
-        "Content-Type": "application/json"
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.extractionModel,
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: EXTRACTION_SYSTEM_PROMPT
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: conversationToPrompt(conversation, this.settings.maxPromptChars)
+                }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "personal_context_graph_extraction",
+              strict: true,
+              schema: EXTRACTION_SCHEMA
+            }
+          }
+        })
       },
-      throw: false,
-      body: JSON.stringify({
-        model: this.settings.extractionModel,
-        input: [
-          {
-            role: "system",
-            content: [
-              {
-                type: "input_text",
-                text: EXTRACTION_SYSTEM_PROMPT
-              }
-            ]
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: conversationToPrompt(conversation, this.settings.maxPromptChars)
-              }
-            ]
-          }
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "personal_context_graph_extraction",
-            strict: true,
-            schema: EXTRACTION_SCHEMA
-          }
-        }
-      })
-    });
+      "context extraction"
+    );
 
     const body = response.json as OpenAIResponseBody;
     if (response.status >= 400 || body.error) {
@@ -121,46 +126,49 @@ export class OpenAIProvider implements AIProvider {
       conversationToPrompt(conversation, this.settings.maxPromptChars)
     ].join("\n");
 
-    const response = await requestUrl({
-      url: "https://api.openai.com/v1/responses",
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
-        "Content-Type": "application/json"
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.extractionModel,
+          input: [
+            {
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: SELF_MODEL_SYSTEM_PROMPT
+                }
+              ]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: selfModelPayload
+                }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "personal_context_graph_self_model",
+              strict: true,
+              schema: SELF_MODEL_SCHEMA
+            }
+          }
+        })
       },
-      throw: false,
-      body: JSON.stringify({
-        model: this.settings.extractionModel,
-        input: [
-          {
-            role: "system",
-            content: [
-              {
-                type: "input_text",
-                text: SELF_MODEL_SYSTEM_PROMPT
-              }
-            ]
-          },
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: selfModelPayload
-              }
-            ]
-          }
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "personal_context_graph_self_model",
-            strict: true,
-            schema: SELF_MODEL_SCHEMA
-          }
-        }
-      })
-    });
+      "self-model extraction"
+    );
 
     const body = response.json as OpenAIResponseBody;
     if (response.status >= 400 || body.error) {
@@ -194,28 +202,31 @@ export class OpenAIProvider implements AIProvider {
         .map((quote, index) => `${index + 1}. ${quote.trim()}`)
     ].join("\n");
 
-    const response = await requestUrl({
-      url: "https://api.openai.com/v1/responses",
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
-        "Content-Type": "application/json"
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.extractionModel,
+          input: [
+            {
+              role: "system",
+              content: [{ type: "input_text", text: NODE_SYNTHESIS_SYSTEM_PROMPT }]
+            },
+            {
+              role: "user",
+              content: [{ type: "input_text", text: userPayload }]
+            }
+          ]
+        })
       },
-      throw: false,
-      body: JSON.stringify({
-        model: this.settings.extractionModel,
-        input: [
-          {
-            role: "system",
-            content: [{ type: "input_text", text: NODE_SYNTHESIS_SYSTEM_PROMPT }]
-          },
-          {
-            role: "user",
-            content: [{ type: "input_text", text: userPayload }]
-          }
-        ]
-      })
-    });
+      "node summary synthesis"
+    );
 
     const body = response.json as OpenAIResponseBody;
     if (response.status >= 400 || body.error) {
@@ -230,19 +241,22 @@ export class OpenAIProvider implements AIProvider {
       throw new Error("OpenAI API key is required before embedding text.");
     }
 
-    const response = await requestUrl({
-      url: "https://api.openai.com/v1/embeddings",
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
-        "Content-Type": "application/json"
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/embeddings",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.embeddingModel,
+          input: text
+        })
       },
-      throw: false,
-      body: JSON.stringify({
-        model: this.settings.embeddingModel,
-        input: text
-      })
-    });
+      "embedding"
+    );
 
     const body = response.json as OpenAIEmbeddingBody;
     if (response.status >= 400 || body.error) {
@@ -255,6 +269,33 @@ export class OpenAIProvider implements AIProvider {
     }
 
     return embedding;
+  }
+}
+
+async function requestOpenAi(
+  options: Parameters<typeof requestUrl>[0],
+  label: string
+): Promise<Awaited<ReturnType<typeof requestUrl>>> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      requestUrl(options),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(
+            new Error(
+              `OpenAI ${label} timed out after ${Math.round(
+                OPENAI_REQUEST_TIMEOUT_MS / 1000
+              )} seconds.`
+            )
+          );
+        }, OPENAI_REQUEST_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
   }
 }
 

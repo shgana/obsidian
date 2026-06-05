@@ -14,7 +14,11 @@ import { ImportConsentModal, ProgressModal, ZipImportModal } from "./modals";
 import { DEFAULT_SETTINGS, type PersonalContextGraphSettings } from "./settings";
 import { PersonalContextGraphSettingTab } from "./settingsTab";
 import { parseChatGptExportZip } from "./chatgptParser";
-import { migrateImportRunState, sanitizeImportErrorMessage } from "./importRunState";
+import {
+  markInterruptedImportRunState,
+  migrateImportRunState,
+  sanitizeImportErrorMessage
+} from "./importRunState";
 import type {
   GraphBuildReport,
   ImportPreview,
@@ -38,6 +42,7 @@ export default class PersonalContextGraphPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadPluginData();
+    await this.failInterruptedImportRun();
 
     this.addSettingTab(new PersonalContextGraphSettingTab(this.app, this));
     this.registerView(
@@ -115,7 +120,10 @@ export default class PersonalContextGraphPlugin extends Plugin {
       lastImportErrorAt: undefined,
       lastImportFileName: file.name,
       lastImportSelectedConversations: undefined,
-      lastImportTotalConversations: undefined
+      lastImportTotalConversations: undefined,
+      lastImportProgressMessage: undefined,
+      lastImportProgressCompleted: undefined,
+      lastImportProgressTotal: undefined
     });
 
     try {
@@ -134,7 +142,10 @@ export default class PersonalContextGraphPlugin extends Plugin {
         lastImportPhase: "preview_ready",
         lastImportStatus: "running",
         lastImportSelectedConversations: preview.selectedConversations,
-        lastImportTotalConversations: preview.totalConversations
+        lastImportTotalConversations: preview.totalConversations,
+        lastImportProgressMessage: "Preview ready. Waiting for import confirmation.",
+        lastImportProgressCompleted: 0,
+        lastImportProgressTotal: preview.selectedConversations
       });
       new ImportConsentModal(
         this.app,
@@ -145,7 +156,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
           this.updateImportRunState({
             lastImportCompletedAt: new Date().toISOString(),
             lastImportPhase: "preview_ready",
-            lastImportStatus: "cancelled"
+            lastImportStatus: "cancelled",
+            lastImportProgressMessage: "Import cancelled before extraction."
           })
       ).open();
     } catch (error) {
@@ -163,7 +175,10 @@ export default class PersonalContextGraphPlugin extends Plugin {
         lastImportPhase: "confirmed",
         lastImportStatus: "running",
         lastImportSelectedConversations: preview?.selectedConversations ?? conversations.length,
-        lastImportTotalConversations: preview?.totalConversations ?? conversations.length
+        lastImportTotalConversations: preview?.totalConversations ?? conversations.length,
+        lastImportProgressMessage: "Import confirmed. Starting extraction.",
+        lastImportProgressCompleted: 0,
+        lastImportProgressTotal: preview?.selectedConversations ?? conversations.length
       });
       const provider = new OpenAIProvider(this.settings);
       await this.updateImportRunState({
@@ -173,10 +188,18 @@ export default class PersonalContextGraphPlugin extends Plugin {
       const canonicalState = await loadCanonicalContextState(this.app.vault, this.settings);
       const artifacts = await runImport(conversations, this.settings, provider, canonicalState, (status) => {
         const phase = progressPhaseToImportRunPhase(status.phase);
-        if (this.importRunState.lastImportPhase !== phase) {
+        if (
+          this.importRunState.lastImportPhase !== phase ||
+          this.importRunState.lastImportProgressMessage !== status.message ||
+          this.importRunState.lastImportProgressCompleted !== status.completed ||
+          this.importRunState.lastImportProgressTotal !== status.total
+        ) {
           void this.updateImportRunState({
             lastImportPhase: phase,
-            lastImportStatus: "running"
+            lastImportStatus: "running",
+            lastImportProgressMessage: status.message,
+            lastImportProgressCompleted: status.completed,
+            lastImportProgressTotal: status.total
           });
         }
         progress.update(`${status.message} (${status.completed}/${status.total})`);
@@ -253,10 +276,22 @@ export default class PersonalContextGraphPlugin extends Plugin {
   private async updateImportRunState(patch: Partial<ImportRunState>): Promise<void> {
     this.importRunState = {
       ...this.importRunState,
-      ...patch
+      ...patch,
+      lastImportUpdatedAt: new Date().toISOString()
     };
     await this.savePluginData();
     this.refreshDashboard();
+  }
+
+  private async failInterruptedImportRun(): Promise<void> {
+    const interruptedAt = new Date().toISOString();
+    const updatedState = markInterruptedImportRunState(this.importRunState, interruptedAt);
+    if (updatedState === this.importRunState) {
+      return;
+    }
+
+    this.importRunState = updatedState;
+    await this.savePluginData();
   }
 
   private async markImportFailed(error: unknown, phase: ImportRunPhase): Promise<void> {
@@ -269,15 +304,20 @@ export default class PersonalContextGraphPlugin extends Plugin {
   }
 
   private markImportSucceeded(report: GraphBuildReport): void {
+    const completedAt = report.completedAt || new Date().toISOString();
     this.importRunState = {
       ...this.importRunState,
-      lastImportCompletedAt: report.completedAt || new Date().toISOString(),
+      lastImportCompletedAt: completedAt,
+      lastImportUpdatedAt: completedAt,
       lastImportPhase: "completed",
       lastImportStatus: "succeeded",
       lastImportError: undefined,
       lastImportErrorAt: undefined,
       lastImportSelectedConversations: report.processedConversationCount,
-      lastImportTotalConversations: report.importedConversationCount
+      lastImportTotalConversations: report.importedConversationCount,
+      lastImportProgressMessage: "Import completed.",
+      lastImportProgressCompleted: report.processedConversationCount,
+      lastImportProgressTotal: report.processedConversationCount
     };
   }
 

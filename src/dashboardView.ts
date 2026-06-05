@@ -95,9 +95,19 @@ export function renderImportStatus(
       text: `Conversations: ${state.lastImportSelectedConversations ?? "?"} selected of ${state.lastImportTotalConversations ?? "?"}`
     });
   }
+  if (state.lastImportProgressMessage) {
+    list.createEl("li", {
+      text: `Progress: ${state.lastImportProgressMessage} (${state.lastImportProgressCompleted ?? "?"}/${state.lastImportProgressTotal ?? "?"})`
+    });
+  }
   if (state.lastImportStartedAt) {
     list.createEl("li", {
       text: `Started: ${state.lastImportStartedAt}`
+    });
+  }
+  if (state.lastImportUpdatedAt) {
+    list.createEl("li", {
+      text: `Last updated: ${state.lastImportUpdatedAt}`
     });
   }
   if (state.lastImportCompletedAt) {

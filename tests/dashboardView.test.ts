@@ -17,13 +17,17 @@ describe("dashboard import status", () => {
     const container = new MockElement("div");
     const state: ImportRunState = {
       lastImportStartedAt: "2026-06-04T12:00:00.000Z",
+      lastImportUpdatedAt: "2026-06-04T12:01:00.000Z",
       lastImportPhase: "extracting",
       lastImportStatus: "failed",
       lastImportError: "OpenAI request failed",
       lastImportErrorAt: "2026-06-04T12:01:00.000Z",
       lastImportFileName: "export.zip",
       lastImportSelectedConversations: 20,
-      lastImportTotalConversations: 300
+      lastImportTotalConversations: 300,
+      lastImportProgressMessage: "Extracting context from Posture Scoring Method",
+      lastImportProgressCompleted: 0,
+      lastImportProgressTotal: 20
     };
 
     renderImportStatus(container as never, state, checkpoint("2026-05-31T00:11:54.384Z"));
@@ -33,6 +37,8 @@ describe("dashboard import status", () => {
     expect(text).toContain("Phase: extracting");
     expect(text).toContain("File: export.zip");
     expect(text).toContain("Conversations: 20 selected of 300");
+    expect(text).toContain("Progress: Extracting context from Posture Scoring Method (0/20)");
+    expect(text).toContain("Last updated: 2026-06-04T12:01:00.000Z");
     expect(text).toContain("Last error: OpenAI request failed");
     expect(text).toContain("latest import attempt is newer than the saved checkpoint");
   });
