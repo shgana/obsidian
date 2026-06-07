@@ -4,6 +4,17 @@ export class TFile {
   parent = null;
 }
 
+export class TFolder {
+  path = "";
+  name = "";
+  parent = null;
+  children: Array<TFile | TFolder> = [];
+
+  isRoot(): boolean {
+    return this.path === "";
+  }
+}
+
 export class ItemView {
   contentEl = new MockElement("div");
 

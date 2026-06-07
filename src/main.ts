@@ -352,13 +352,24 @@ function isStoredPluginData(value: unknown): value is StoredPluginData {
 function migrateSettings(
   value: Partial<PersonalContextGraphSettings>
 ): PersonalContextGraphSettings {
+  const shouldApplyVisualDefaults = (value.visualGraphDefaultsVersion ?? 0) < 2;
   const settings = {
     ...DEFAULT_SETTINGS,
     ...value,
     rememberOpenAiApiKey: value.rememberOpenAiApiKey ?? false,
     linkAgentContextToGraph: value.linkAgentContextToGraph ?? false,
     pruneStaleManagedFiles: value.pruneStaleManagedFiles ?? true,
-    enableSelfModelExtraction: value.enableSelfModelExtraction ?? true
+    enableSelfModelExtraction: value.enableSelfModelExtraction ?? true,
+    agentContextSections: shouldApplyVisualDefaults
+      ? DEFAULT_SETTINGS.agentContextSections
+      : value.agentContextSections ?? DEFAULT_SETTINGS.agentContextSections,
+    maxCoOccurrenceLinksPerType: shouldApplyVisualDefaults
+      ? DEFAULT_SETTINGS.maxCoOccurrenceLinksPerType
+      : value.maxCoOccurrenceLinksPerType ?? DEFAULT_SETTINGS.maxCoOccurrenceLinksPerType,
+    maxSimilarityLinksPerType: shouldApplyVisualDefaults
+      ? DEFAULT_SETTINGS.maxSimilarityLinksPerType
+      : value.maxSimilarityLinksPerType ?? DEFAULT_SETTINGS.maxSimilarityLinksPerType,
+    visualGraphDefaultsVersion: DEFAULT_SETTINGS.visualGraphDefaultsVersion
   };
 
   if (!settings.rememberOpenAiApiKey) {

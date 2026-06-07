@@ -24,6 +24,7 @@ export interface PersonalContextGraphSettings {
   synthesizeNodeSummaries: boolean;
   synthesizeNodeSummaryMinEvidence: number;
   agentContextSections: boolean;
+  visualGraphDefaultsVersion: number;
   enableSelfModelExtraction: boolean;
   estimatedExtractionCostPer1MInputTokensUsd: number;
 }
@@ -43,15 +44,16 @@ export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   minimumCanonicalSources: 2,
   maxSourceLinksPerType: 3,
   maxProjectLinksPerType: 3,
-  maxCoOccurrenceLinksPerType: 4,
-  maxSimilarityLinksPerType: 4,
+  maxCoOccurrenceLinksPerType: 2,
+  maxSimilarityLinksPerType: 2,
   similarityLinkThreshold: 0.78,
   maxPromptChars: 36000,
   linkAgentContextToGraph: false,
   pruneStaleManagedFiles: true,
   synthesizeNodeSummaries: true,
   synthesizeNodeSummaryMinEvidence: 3,
-  agentContextSections: true,
+  agentContextSections: false,
+  visualGraphDefaultsVersion: 2,
   enableSelfModelExtraction: true,
   estimatedExtractionCostPer1MInputTokensUsd: 0.25
 };

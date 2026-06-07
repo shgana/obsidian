@@ -1,4 +1,4 @@
-import { normalizePath, TFile, type Vault } from "obsidian";
+import { normalizePath, TFile, TFolder, type Vault } from "obsidian";
 import type { FileDraft, WriteSummary } from "./types";
 import type { PersonalContextGraphSettings } from "./settings";
 
@@ -68,6 +68,10 @@ export class ManagedVaultWriter {
       summary.created += 1;
     }
 
+    if (this.settings.pruneStaleManagedFiles) {
+      await this.deleteEmptyStaleFolders(drafts);
+    }
+
     return summary;
   }
 
@@ -112,6 +116,28 @@ export class ManagedVaultWriter {
     }
 
     return deleted;
+  }
+
+  private async deleteEmptyStaleFolders(drafts: FileDraft[]): Promise<void> {
+    const draftParentPaths = new Set(drafts.map((draft) => parentPath(normalizePath(draft.path))));
+    const folders = this.vault
+      .getAllLoadedFiles()
+      .filter((file): file is TFolder => file instanceof TFolder)
+      .filter((folder) => this.isInsideOutputFolder(folder.path))
+      .filter((folder) => folder.path !== normalizePath(this.settings.outputFolder))
+      .sort((left, right) => right.path.length - left.path.length);
+
+    for (const folder of folders) {
+      if (draftParentPaths.has(folder.path)) {
+        continue;
+      }
+
+      if (folder.children.length > 0) {
+        continue;
+      }
+
+      await this.vault.delete(folder);
+    }
   }
 }
 

@@ -26,6 +26,11 @@ const provider: AIProvider = {
 };
 
 describe("context graph builder", () => {
+  it("uses moderate default graph-density caps", () => {
+    expect(DEFAULT_SETTINGS.maxCoOccurrenceLinksPerType).toBe(2);
+    expect(DEFAULT_SETTINGS.maxSimilarityLinksPerType).toBe(2);
+  });
+
   it("creates conservative typed nodes and source-to-node edges", async () => {
     const graph = await buildContextGraph(
       [
@@ -271,8 +276,10 @@ describe("context graph builder", () => {
 
   it("adds similarity links between semantically close nodes that never co-occurred", async () => {
     const labelEmbeddings: Record<string, number[]> = {
-      neighborhood: [1, 0.6, 0],
-      "neighbourhood network": [0.4, 1, 0],
+      neighborhood: [1, 0, 0],
+      "neighbourhood network": [0.8, 0.6, 0],
+      "local community graph": [0.8, 0, 0.6],
+      "resident network map": [0.7, 0, 0.714],
       unrelated: [0, 0, 1]
     };
 
@@ -299,6 +306,8 @@ describe("context graph builder", () => {
       [
         extractionInput("conv-a", "Conversation A", "neighborhood", 0.95),
         extractionInput("conv-b", "Conversation B", "neighbourhood network", 0.95),
+        extractionInput("conv-d", "Conversation D", "local community graph", 0.95),
+        extractionInput("conv-e", "Conversation E", "resident network map", 0.95),
         extractionInput("conv-c", "Conversation C", "unrelated", 0.95)
       ],
       settings,
@@ -314,6 +323,7 @@ describe("context graph builder", () => {
     expect(unrelated).toBeDefined();
 
     const neighborhoodLinks = graph.nodeLinksById[neighborhood!.id]?.topic || [];
+    expect(neighborhoodLinks).toHaveLength(2);
     expect(neighborhoodLinks.some((node) => node.id === network!.id)).toBe(true);
     expect(neighborhoodLinks.some((node) => node.id === unrelated!.id)).toBe(false);
   });

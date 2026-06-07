@@ -32,7 +32,8 @@ describe("import pipeline", () => {
       openAiApiKey: "test",
       costCapUsd: 10,
       outputFolder: "Context Graph",
-      minimumCanonicalSources: 1
+      minimumCanonicalSources: 1,
+      agentContextSections: true
     };
 
     const artifacts = await runImport(
@@ -54,7 +55,8 @@ describe("import pipeline", () => {
       openAiApiKey: "test",
       costCapUsd: 10,
       outputFolder: "Context Graph",
-      minimumCanonicalSources: 1
+      minimumCanonicalSources: 1,
+      agentContextSections: true
     };
 
     const artifacts = await runImport(
@@ -88,6 +90,7 @@ describe("import pipeline", () => {
       costCapUsd: 10,
       outputFolder: "Context Graph",
       minimumCanonicalSources: 1,
+      agentContextSections: true,
       linkAgentContextToGraph: true
     };
 
@@ -123,26 +126,33 @@ describe("import pipeline", () => {
       selfModelProvider
     );
 
-    const readme = artifacts.drafts.find(
-      (draft) => draft.path === "Context Graph/Agent Context/README.md"
-    );
-    const agentInstructionSection = artifacts.drafts.find(
-      (draft) => draft.path === "Context Graph/Agent Context/01 Agent Instructions.md"
-    );
-    const topicSection = artifacts.drafts.find(
-      (draft) => draft.path === "Context Graph/Agent Context/08 Recent Topics.md"
+    const agentContext = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context.md"
     );
 
-    expect(readme?.content.indexOf("01 Agent Instructions")).toBeLessThan(
-      readme?.content.indexOf("08 Recent Topics") || Number.MAX_SAFE_INTEGER
+    expect(agentContext?.content.indexOf("## Identity Card")).toBeLessThan(
+      agentContext?.content.indexOf("## Profile Summary") || Number.MAX_SAFE_INTEGER
     );
-    expect(agentInstructionSection?.content).toContain("Use inspectable Markdown memory");
-    expect(agentInstructionSection?.content).toContain("**Agent instruction:** Prefer visible, source-backed Markdown context over hidden memory.");
-    expect(topicSection?.content).toContain("Obsidian");
+    expect(agentContext?.content.indexOf("## Profile Summary")).toBeLessThan(
+      agentContext?.content.indexOf("## Agent Instructions") || Number.MAX_SAFE_INTEGER
+    );
+    expect(agentContext?.content.indexOf("## Agent Instructions")).toBeLessThan(
+      agentContext?.content.indexOf("## Patterns") || Number.MAX_SAFE_INTEGER
+    );
+    expect(agentContext?.content.indexOf("## Patterns")).toBeLessThan(
+      agentContext?.content.indexOf("## Projects") || Number.MAX_SAFE_INTEGER
+    );
+    expect(agentContext?.content.indexOf("## Projects")).toBeLessThan(
+      agentContext?.content.indexOf("## Topics") || Number.MAX_SAFE_INTEGER
+    );
+    expect(agentContext?.content).toContain("_Me (Context Graph/Entities/_Me.md)");
+    expect(agentContext?.content).toContain("Use inspectable Markdown memory");
+    expect(agentContext?.content).toContain("visible, source-backed Markdown context");
+    expect(agentContext?.content).toContain("Obsidian");
     expect(artifacts.report.canonicalSelfModelNodeCount).toBe(1);
   });
 
-  it("renders source notes, typed nodes, and a sectioned agent context", async () => {
+  it("renders source notes, typed nodes, and a single default agent context", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,
       openAiApiKey: "test",
@@ -159,8 +169,8 @@ describe("import pipeline", () => {
 
     expect(artifacts.report.processedConversationCount).toBe(1);
     expect(artifacts.drafts.every((draft) => draft.path.startsWith("Context Graph/"))).toBe(true);
-    expect(artifacts.drafts.some((draft) => draft.path.endsWith("Agent Context.md"))).toBe(false);
-    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(true);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context.md")).toBe(true);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(false);
     expect(artifacts.drafts.some((draft) => draft.path.includes("/Topics/"))).toBe(true);
 
     const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
@@ -169,12 +179,12 @@ describe("import pipeline", () => {
     expect(sourceDraft?.content).toContain("  - \"topic_obsidian\"");
     expect(sourceDraft?.content).toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
 
-    const topicsSection = artifacts.drafts.find(
-      (draft) => draft.path === "Context Graph/Agent Context/08 Recent Topics.md"
+    const agentContext = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context.md"
     );
-    expect(topicsSection?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(agentContext?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
     expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Review Queue.md")).toBe(true);
-    expect(artifacts.report.agentContextPath).toBe("Context Graph/Agent Context/README.md");
+    expect(artifacts.report.agentContextPath).toBe("Context Graph/Agent Context.md");
     expect(artifacts.checkpoint.sourceManifest).toHaveLength(1);
     expect("conversations" in artifacts.checkpoint).toBe(false);
   });
@@ -204,14 +214,14 @@ describe("import pipeline", () => {
     expect(artifacts.report.reviewQueueItemCount).toBe(1);
   });
 
-  it("still emits a legacy Agent Context.md when sectioned mode is disabled", async () => {
+  it("still emits sectioned Agent Context files when explicitly enabled", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,
       openAiApiKey: "test",
       costCapUsd: 10,
       outputFolder: "Context Graph",
       minimumCanonicalSources: 1,
-      agentContextSections: false
+      agentContextSections: true
     };
 
     const artifacts = await runImport(
@@ -220,12 +230,12 @@ describe("import pipeline", () => {
       mockProvider
     );
 
-    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context.md")).toBe(true);
-    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(false);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context.md")).toBe(false);
+    expect(artifacts.drafts.some((draft) => draft.path === "Context Graph/Agent Context/README.md")).toBe(true);
 
-    const agentDraft = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context.md"));
-    expect(agentDraft?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
-    expect(agentDraft?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
+    const topicSection = artifacts.drafts.find((draft) => draft.path.endsWith("Agent Context/08 Recent Topics.md"));
+    expect(topicSection?.content).toContain("Obsidian (Context Graph/Topics/Obsidian.md)");
+    expect(topicSection?.content).not.toContain("[[Context Graph/Topics/Obsidian|Obsidian]]");
   });
 
   it("renders source-only context for transactional conversations without promoting filler entities", async () => {
