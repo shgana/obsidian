@@ -299,6 +299,91 @@ export interface ImportRunState {
   lastImportProgressTotal?: number;
 }
 
+export type ApiUsagePhase =
+  | "context_extraction"
+  | "self_model_extraction"
+  | "node_summary_synthesis"
+  | "embedding"
+  | "agent_context_synthesis";
+
+export interface ApiUsageEvent {
+  phase: ApiUsagePhase;
+  model: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  embeddingTokens?: number;
+  totalTokens?: number;
+  estimatedCostUsd?: number;
+  cached?: boolean;
+  timestamp?: string;
+}
+
+export interface ApiUsagePhaseSummary {
+  calls: number;
+  cacheHits: number;
+  cacheMisses: number;
+  inputTokens: number;
+  outputTokens: number;
+  embeddingTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
+export interface ImportCacheStats {
+  extractionHits: number;
+  extractionMisses: number;
+  selfModelHits: number;
+  selfModelMisses: number;
+  embeddingHits: number;
+  embeddingMisses: number;
+  nodeSummaryHits: number;
+  nodeSummaryMisses: number;
+  agentContextHits: number;
+  agentContextMisses: number;
+}
+
+export interface CachedExtractionEntry {
+  createdAt: string;
+  sourceId: string;
+  transcriptHash: string;
+  model: string;
+  promptVersion: string;
+  value: ExtractedContext;
+}
+
+export interface CachedSelfModelEntry {
+  createdAt: string;
+  sourceId: string;
+  transcriptHash: string;
+  model: string;
+  promptVersion: string;
+  value: Partial<ExtractedContext>;
+}
+
+export interface CachedEmbeddingEntry {
+  createdAt: string;
+  textHash: string;
+  model: string;
+  vector: number[];
+}
+
+export interface CachedTextEntry {
+  createdAt: string;
+  inputHash: string;
+  model: string;
+  promptVersion: string;
+  text: string;
+}
+
+export interface ImportCacheState {
+  version: 1;
+  extraction: Record<string, CachedExtractionEntry>;
+  selfModel: Record<string, CachedSelfModelEntry>;
+  embeddings: Record<string, CachedEmbeddingEntry>;
+  nodeSummaries: Record<string, CachedTextEntry>;
+  agentContext: Record<string, CachedTextEntry>;
+}
+
 export interface GraphBuildReport {
   importedConversationCount: number;
   processedConversationCount: number;
@@ -342,6 +427,15 @@ export interface GraphBuildReport {
   estimatedExtractionCostUsd: number;
   estimatedEmbeddingCostUsd: number;
   estimatedCostUsd: number;
+  actualInputTokens?: number;
+  actualOutputTokens?: number;
+  actualEmbeddingTokens?: number;
+  actualTotalTokens?: number;
+  actualCostUsd?: number;
+  cacheHitCount?: number;
+  cacheMissCount?: number;
+  cacheStats?: ImportCacheStats;
+  apiUsageByPhase?: Partial<Record<ApiUsagePhase, ApiUsagePhaseSummary>>;
   warnings: string[];
 }
 
@@ -362,9 +456,37 @@ export interface SourceManifestEntry {
 }
 
 export interface SynthesizeSummaryArgs {
+  key?: string;
   type: ContextNodeType;
   label: string;
   evidenceQuotes: string[];
+}
+
+export interface AgentContextSynthesisNode {
+  type: ContextNodeType;
+  label: string;
+  summary: string;
+  confidence: number;
+  evidenceCount: number;
+  stability?: SelfModelStability;
+  inferenceLevel?: SelfModelInferenceLevel;
+  appliesTo?: string[];
+  agentInstruction?: string;
+  lastSeen?: string;
+}
+
+export interface AgentContextSourceSummary {
+  sourceId: string;
+  title: string;
+  summary: string;
+  lastSeen?: string;
+}
+
+export interface SynthesizeAgentContextArgs {
+  identityPath: string;
+  nodes: AgentContextSynthesisNode[];
+  sourceSummaries: AgentContextSourceSummary[];
+  warnings: string[];
 }
 
 export interface AIProvider {
@@ -375,6 +497,11 @@ export interface AIProvider {
   ): Promise<Partial<ExtractedContext>>;
   embedText(text: string): Promise<number[]>;
   synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string>;
+  synthesizeSummariesBatch?(
+    args: SynthesizeSummaryArgs[]
+  ): Promise<Array<{ key: string; summary: string }>>;
+  synthesizeAgentContextProfile?(args: SynthesizeAgentContextArgs): Promise<string>;
+  getUsageEvents?(): ApiUsageEvent[];
 }
 
 export interface FileDraft {

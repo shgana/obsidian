@@ -15,12 +15,18 @@ import { DEFAULT_SETTINGS, type PersonalContextGraphSettings } from "./settings"
 import { PersonalContextGraphSettingTab } from "./settingsTab";
 import { parseChatGptExportZip } from "./chatgptParser";
 import {
+  CachedAIProvider,
+  createEmptyImportCacheState,
+  migrateImportCacheState
+} from "./importCache";
+import {
   markInterruptedImportRunState,
   migrateImportRunState,
   sanitizeImportErrorMessage
 } from "./importRunState";
 import type {
   GraphBuildReport,
+  ImportCacheState,
   ImportPreview,
   ImportRunPhase,
   ImportRunState,
@@ -33,12 +39,14 @@ interface StoredPluginData {
   settings?: Partial<PersonalContextGraphSettings>;
   checkpoint?: ImportCheckpoint | Record<string, unknown>;
   importRunState?: ImportRunState | Record<string, unknown>;
+  importCache?: ImportCacheState | Record<string, unknown>;
 }
 
 export default class PersonalContextGraphPlugin extends Plugin {
   settings: PersonalContextGraphSettings = { ...DEFAULT_SETTINGS };
   checkpoint?: ImportCheckpoint;
   importRunState: ImportRunState = {};
+  importCache: ImportCacheState = createEmptyImportCacheState();
 
   async onload(): Promise<void> {
     await this.loadPluginData();
@@ -73,6 +81,12 @@ export default class PersonalContextGraphPlugin extends Plugin {
       name: "Export agent context pack",
       callback: () => void this.exportAgentContextPack()
     });
+
+    this.addCommand({
+      id: "clear-import-cache",
+      name: "Clear import cache",
+      callback: () => void this.clearImportCache()
+    });
   }
 
   onunload(): void {
@@ -87,6 +101,9 @@ export default class PersonalContextGraphPlugin extends Plugin {
     this.importRunState = isStoredPluginData(data)
       ? migrateImportRunState(data.importRunState)
       : {};
+    this.importCache = isStoredPluginData(data)
+      ? migrateImportCacheState(data.importCache)
+      : createEmptyImportCacheState();
   }
 
   async saveSettings(): Promise<void> {
@@ -97,7 +114,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
     await this.saveData({
       settings: settingsForStorage(this.settings),
       checkpoint: this.checkpoint,
-      importRunState: this.importRunState
+      importRunState: this.importRunState,
+      importCache: this.importCache
     } satisfies StoredPluginData);
   }
 
@@ -180,30 +198,44 @@ export default class PersonalContextGraphPlugin extends Plugin {
         lastImportProgressCompleted: 0,
         lastImportProgressTotal: preview?.selectedConversations ?? conversations.length
       });
-      const provider = new OpenAIProvider(this.settings);
+      const openAiProvider = new OpenAIProvider(this.settings);
+      const cachedProvider = this.settings.enableImportCache
+        ? new CachedAIProvider(openAiProvider, this.settings, this.importCache)
+        : undefined;
+      const provider = cachedProvider || openAiProvider;
       await this.updateImportRunState({
         lastImportPhase: "extracting",
         lastImportStatus: "running"
       });
       const canonicalState = await loadCanonicalContextState(this.app.vault, this.settings);
-      const artifacts = await runImport(conversations, this.settings, provider, canonicalState, (status) => {
-        const phase = progressPhaseToImportRunPhase(status.phase);
-        if (
-          this.importRunState.lastImportPhase !== phase ||
-          this.importRunState.lastImportProgressMessage !== status.message ||
-          this.importRunState.lastImportProgressCompleted !== status.completed ||
-          this.importRunState.lastImportProgressTotal !== status.total
-        ) {
-          void this.updateImportRunState({
-            lastImportPhase: phase,
-            lastImportStatus: "running",
-            lastImportProgressMessage: status.message,
-            lastImportProgressCompleted: status.completed,
-            lastImportProgressTotal: status.total
-          });
+      const artifacts = await runImport(
+        conversations,
+        this.settings,
+        provider,
+        canonicalState,
+        (status) => {
+          const phase = progressPhaseToImportRunPhase(status.phase);
+          if (
+            this.importRunState.lastImportPhase !== phase ||
+            this.importRunState.lastImportProgressMessage !== status.message ||
+            this.importRunState.lastImportProgressCompleted !== status.completed ||
+            this.importRunState.lastImportProgressTotal !== status.total
+          ) {
+            void this.updateImportRunState({
+              lastImportPhase: phase,
+              lastImportStatus: "running",
+              lastImportProgressMessage: status.message,
+              lastImportProgressCompleted: status.completed,
+              lastImportProgressTotal: status.total
+            });
+          }
+          progress.update(`${status.message} (${status.completed}/${status.total})`);
+        },
+        {
+          onCacheUpdated: () => this.savePluginData(),
+          getCacheStats: () => cachedProvider?.getCacheStats()
         }
-        progress.update(`${status.message} (${status.completed}/${status.total})`);
-      });
+      );
       const writer = new ManagedVaultWriter(this.app.vault, this.settings);
       await this.updateImportRunState({
         lastImportPhase: "writing_vault",
@@ -246,6 +278,13 @@ export default class PersonalContextGraphPlugin extends Plugin {
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async clearImportCache(): Promise<void> {
+    this.importCache = createEmptyImportCacheState();
+    await this.savePluginData();
+    this.refreshDashboard();
+    new Notice("Personal Context Graph import cache cleared.");
   }
 
   async activateDashboard(): Promise<void> {
@@ -345,7 +384,7 @@ function isStoredPluginData(value: unknown): value is StoredPluginData {
   return (
     typeof value === "object" &&
     value !== null &&
-    ("settings" in value || "checkpoint" in value || "importRunState" in value)
+    ("settings" in value || "checkpoint" in value || "importRunState" in value || "importCache" in value)
   );
 }
 
@@ -360,6 +399,8 @@ function migrateSettings(
     linkAgentContextToGraph: value.linkAgentContextToGraph ?? false,
     pruneStaleManagedFiles: value.pruneStaleManagedFiles ?? true,
     enableSelfModelExtraction: value.enableSelfModelExtraction ?? true,
+    enableImportCache: value.enableImportCache ?? true,
+    synthesizeAgentContextProfile: value.synthesizeAgentContextProfile ?? true,
     agentContextSections: shouldApplyVisualDefaults
       ? DEFAULT_SETTINGS.agentContextSections
       : value.agentContextSections ?? DEFAULT_SETTINGS.agentContextSections,

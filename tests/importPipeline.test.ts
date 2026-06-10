@@ -24,6 +24,20 @@ describe("import pipeline", () => {
       preview.estimatedExtractionCostUsd + preview.estimatedEmbeddingCostUsd,
       8
     );
+
+    const explicitOnlyPreview = createImportPreview(
+      "test.zip",
+      [conversation("conv-cost", "Cost test", "x".repeat(4000))],
+      {
+        ...DEFAULT_SETTINGS,
+        extractionModel: "gpt-5.4",
+        embeddingModel: "text-embedding-3-large",
+        enableSelfModelExtraction: false
+      }
+    );
+    expect(preview.estimatedExtractionOutputTokens).toBeGreaterThan(
+      explicitOnlyPreview.estimatedExtractionOutputTokens
+    );
   });
 
   it("emits a protected identity stub once and never overwrites it", async () => {
@@ -276,6 +290,85 @@ describe("import pipeline", () => {
     await expect(
       runImport([conversation("conv-big", "Big", "x".repeat(5000))], settings, provider)
     ).rejects.toThrow(/exceeds the configured cap/);
+  });
+
+  it("records actual usage and cost in the import report when provider usage is available", async () => {
+    const provider: AIProvider = {
+      ...mockProvider,
+      getUsageEvents() {
+        return [
+          {
+            phase: "context_extraction",
+            model: "gpt-5.4",
+            inputTokens: 1000,
+            outputTokens: 200,
+            totalTokens: 1200,
+            cached: false
+          },
+          {
+            phase: "embedding",
+            model: "text-embedding-3-large",
+            embeddingTokens: 300,
+            totalTokens: 300,
+            cached: false
+          }
+        ];
+      }
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-usage", "Usage report")],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph",
+        minimumCanonicalSources: 1,
+        synthesizeNodeSummaries: false,
+        synthesizeAgentContextProfile: false
+      },
+      provider
+    );
+
+    expect(artifacts.report.actualInputTokens).toBe(1000);
+    expect(artifacts.report.actualOutputTokens).toBe(200);
+    expect(artifacts.report.actualEmbeddingTokens).toBe(300);
+    expect(artifacts.report.actualCostUsd).toBeGreaterThan(0);
+    expect(artifacts.report.apiUsageByPhase?.context_extraction?.calls).toBe(1);
+    expect(artifacts.report.apiUsageByPhase?.embedding?.calls).toBe(1);
+  });
+
+  it("falls back to deterministic Agent Context summary when global synthesis fails", async () => {
+    const provider: AIProvider = {
+      ...mockProvider,
+      async synthesizeAgentContextProfile(): Promise<string> {
+        throw new Error("profile synthesis unavailable");
+      }
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-agent-fallback", "Agent fallback")],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph",
+        minimumCanonicalSources: 1
+      },
+      provider
+    );
+
+    const agentContext = artifacts.drafts.find(
+      (draft) => draft.path === "Context Graph/Agent Context.md"
+    );
+    expect(agentContext?.content).toContain(
+      "The user is designing an Obsidian-based personal context graph."
+    );
+    expect(
+      artifacts.report.warnings.some((warning) =>
+        warning.includes("Agent Context synthesis fell back")
+      )
+    ).toBe(true);
   });
 });
 

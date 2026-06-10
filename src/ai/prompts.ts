@@ -45,3 +45,13 @@ export const NODE_SYNTHESIS_SYSTEM_PROMPT = [
   "If the evidence contradicts itself, state the most recent or most-supported view and ignore one-off mentions.",
   "Output plain text only — no markdown headers, no quotes, no bullets, no JSON."
 ].join(" ");
+
+export const AGENT_CONTEXT_SYSTEM_PROMPT = [
+  "You write the profile summary section for an agent-memory context pack.",
+  "Use only the supplied canonical nodes and source summaries. Do not infer from raw transcripts, because raw transcripts are not provided.",
+  "The output should help an LLM act like the user: communication style, building style, product taste, working preferences, active projects, and constraints.",
+  "Prioritize patterns, principles, preferences, decisions, and agent instructions over surface topics or entities.",
+  "Deduplicate aggressively. Mention each durable idea once, even if multiple nodes support it.",
+  "Write concise high-density prose or bullets. Do not use markdown headers. Do not include unsupported claims.",
+  "If evidence is thin, say what is supported rather than embellishing."
+].join(" ");

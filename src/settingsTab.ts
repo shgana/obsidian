@@ -175,6 +175,26 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Import cache")
+      .setDesc("Stores extracted context, embeddings, and summaries in plugin data so repeat imports can reuse completed work.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.enableImportCache).onChange(async (value) => {
+          this.host.settings.enableImportCache = value;
+          await this.host.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Agent Context synthesis")
+      .setDesc("Uses canonical graph nodes to write a deduped LLM-facing profile summary, with deterministic fallback.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.host.settings.synthesizeAgentContextProfile).onChange(async (value) => {
+          this.host.settings.synthesizeAgentContextProfile = value;
+          await this.host.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
       .setName("Max source links per type")
       .setDesc("Caps visible wikilinks from each source note to canonical graph nodes.")
       .addText((text) =>

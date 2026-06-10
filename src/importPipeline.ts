@@ -1,8 +1,12 @@
 import type { PersonalContextGraphSettings } from "./settings";
 import { buildContextGraph } from "./graphBuilder";
-import { createGraphFileDrafts, buildPrimaryAgentContextPath } from "./markdown";
+import { createGraphFileDrafts, buildIdentityPath, buildPrimaryAgentContextPath } from "./markdown";
+import { embeddingModelPrice, extractionModelPrice, summarizeApiUsage } from "./cost";
+import { cacheHitCount, cacheMissCount } from "./importCache";
 import type {
   AIProvider,
+  AgentContextSynthesisNode,
+  ApiUsageEvent,
   BuiltContextGraph,
   CanonicalContextState,
   CanonicalNodeSeed,
@@ -12,6 +16,7 @@ import type {
   FileDraft,
   GraphBuildReport,
   ImportCheckpoint,
+  ImportCacheStats,
   ImportPreview,
   ParsedConversation,
   WriteSummary
@@ -44,27 +49,18 @@ interface CostEstimate {
   totalCostUsd: number;
 }
 
-interface TokenPrice {
-  inputUsdPer1M: number;
-  outputUsdPer1M: number;
-}
-
-const EXTRACTION_MODEL_PRICES: Record<string, TokenPrice> = {
-  "gpt-5.4-nano": { inputUsdPer1M: 0.2, outputUsdPer1M: 1.25 },
-  "gpt-5.4-mini": { inputUsdPer1M: 0.75, outputUsdPer1M: 4.5 },
-  "gpt-5.4": { inputUsdPer1M: 2.5, outputUsdPer1M: 15 },
-  "gpt-5.5": { inputUsdPer1M: 5, outputUsdPer1M: 30 }
-};
-
-const EMBEDDING_MODEL_PRICES_USD_PER_1M: Record<string, number> = {
-  "text-embedding-3-small": 0.02,
-  "text-embedding-3-large": 0.13
-};
-
 const EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION = 1800;
 const SELF_MODEL_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION = 1000;
+const SYNTHESIS_PROMPT_OVERHEAD_TOKENS_PER_IMPORT = 1800;
+const SYNTHESIS_INPUT_TOKEN_RATIO = 0.12;
+const SYNTHESIS_OUTPUT_TOKEN_RATIO = 0.08;
 const STRUCTURED_OUTPUT_TOKEN_RATIO = 0.35;
 const EMBEDDING_TOKEN_RATIO = 0.35;
+
+export interface ImportRunOptions {
+  onCacheUpdated?: () => Promise<void> | void;
+  getCacheStats?: () => ImportCacheStats | undefined;
+}
 
 export function createImportPreview(
   fileName: string,
@@ -106,7 +102,8 @@ export async function runImport(
     | CanonicalNodeSeed[]
     | CanonicalContextState
     | ((progress: ImportProgress) => void) = [],
-  onProgress?: (progress: ImportProgress) => void
+  onProgress?: (progress: ImportProgress) => void,
+  options: ImportRunOptions = {}
 ): Promise<ImportArtifacts> {
   const canonicalState = normalizeCanonicalState(seedsOrProgress);
   const progress = typeof seedsOrProgress === "function" ? seedsOrProgress : onProgress;
@@ -134,6 +131,7 @@ export async function runImport(
 
     const extraction = await extractConversation(conversation, settings, provider);
     inputs.push({ conversation, extraction });
+    await options.onCacheUpdated?.();
   }
 
   progress?.({
@@ -143,6 +141,7 @@ export async function runImport(
     total: selectedConversations.length
   });
   const graph = await buildContextGraph(inputs, settings, provider, canonicalState);
+  await options.onCacheUpdated?.();
 
   progress?.({
     phase: "rendering",
@@ -150,7 +149,14 @@ export async function runImport(
     completed: selectedConversations.length,
     total: selectedConversations.length
   });
-  const drafts = createGraphFileDrafts(inputs, graph, settings);
+  const agentContextProfileSummary = await synthesizeAgentContextProfile(
+    inputs,
+    graph,
+    settings,
+    provider
+  );
+  await options.onCacheUpdated?.();
+  const drafts = createGraphFileDrafts(inputs, graph, settings, agentContextProfileSummary);
   const completedAt = nowIso();
   const report = createBaseReport({
     startedAt,
@@ -159,7 +165,9 @@ export async function runImport(
     selectedConversations,
     graph,
     preview,
-    settings
+    settings,
+    usageEvents: provider.getUsageEvents?.() || [],
+    cacheStats: options.getCacheStats?.()
   });
   const checkpoint: ImportCheckpoint = {
     importId: `import_${hashString(`${startedAt}:${selectedConversations.length}`)}`,
@@ -182,6 +190,31 @@ export async function runImport(
     checkpoint,
     report
   };
+}
+
+async function synthesizeAgentContextProfile(
+  inputs: ConversationExtraction[],
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<string | undefined> {
+  if (!settings.synthesizeAgentContextProfile || !provider.synthesizeAgentContextProfile) {
+    return undefined;
+  }
+
+  try {
+    const summary = await provider.synthesizeAgentContextProfile(
+      buildAgentContextSynthesisArgs(inputs, graph, settings)
+    );
+    return summary.trim() || undefined;
+  } catch (error) {
+    graph.warnings.push(
+      `Agent Context synthesis fell back to deterministic summary: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return undefined;
+  }
 }
 
 export function rebuildDraftsFromCheckpoint(
@@ -389,7 +422,12 @@ function createBaseReport(args: {
   graph: BuiltContextGraph;
   preview: ImportPreview;
   settings: PersonalContextGraphSettings;
+  usageEvents: ApiUsageEvent[];
+  cacheStats?: ImportCacheStats;
 }): GraphBuildReport {
+  const usageSummary = summarizeApiUsage(args.usageEvents, args.settings);
+  const cacheStats = args.cacheStats;
+  const hasUsageEvents = args.usageEvents.length > 0;
   return {
     importedConversationCount: args.conversations.length,
     processedConversationCount: args.selectedConversations.length,
@@ -438,8 +476,100 @@ function createBaseReport(args: {
     estimatedExtractionCostUsd: args.preview.estimatedExtractionCostUsd,
     estimatedEmbeddingCostUsd: args.preview.estimatedEmbeddingCostUsd,
     estimatedCostUsd: args.preview.estimatedCostUsd,
+    actualInputTokens: hasUsageEvents ? usageSummary.actualInputTokens : undefined,
+    actualOutputTokens: hasUsageEvents ? usageSummary.actualOutputTokens : undefined,
+    actualEmbeddingTokens: hasUsageEvents ? usageSummary.actualEmbeddingTokens : undefined,
+    actualTotalTokens: hasUsageEvents ? usageSummary.actualTotalTokens : undefined,
+    actualCostUsd: hasUsageEvents ? usageSummary.actualCostUsd : undefined,
+    cacheHitCount: cacheStats
+      ? cacheHitCount(cacheStats)
+      : hasUsageEvents
+        ? usageSummary.cacheHitCount
+        : undefined,
+    cacheMissCount: cacheStats
+      ? cacheMissCount(cacheStats)
+      : hasUsageEvents
+        ? usageSummary.cacheMissCount
+        : undefined,
+    cacheStats,
+    apiUsageByPhase: hasUsageEvents ? usageSummary.apiUsageByPhase : undefined,
     warnings: args.graph.warnings
   };
+}
+
+function buildAgentContextSynthesisArgs(
+  inputs: ConversationExtraction[],
+  graph: BuiltContextGraph,
+  settings: PersonalContextGraphSettings
+) {
+  return {
+    identityPath: buildIdentityPath(settings),
+    nodes: graph.nodes
+      .map((node): AgentContextSynthesisNode => ({
+        type: node.type,
+        label: node.label,
+        summary: node.summary,
+        confidence: node.confidence,
+        evidenceCount: node.evidence.length,
+        stability: node.stability,
+        inferenceLevel: node.inferenceLevel,
+        appliesTo: node.appliesTo,
+        agentInstruction: node.agentInstruction,
+        lastSeen: node.lastSeen
+      }))
+      .sort(compareAgentContextNodes)
+      .slice(0, 80),
+    sourceSummaries: inputs
+      .slice()
+      .sort((left, right) =>
+        (right.conversation.updateTime || right.conversation.createTime || "").localeCompare(
+          left.conversation.updateTime || left.conversation.createTime || ""
+        )
+      )
+      .slice(0, 30)
+      .map((input) => ({
+        sourceId: input.conversation.sourceId,
+        title: input.conversation.title,
+        summary: input.extraction.summary,
+        lastSeen: input.conversation.updateTime || input.conversation.createTime
+      })),
+    warnings: graph.warnings.slice(0, 20)
+  };
+}
+
+function compareAgentContextNodes(left: AgentContextSynthesisNode, right: AgentContextSynthesisNode): number {
+  const selfModelDelta = selfModelNodeWeight(right.type) - selfModelNodeWeight(left.type);
+  if (selfModelDelta !== 0) {
+    return selfModelDelta;
+  }
+
+  const evidenceDelta = right.evidenceCount - left.evidenceCount;
+  if (evidenceDelta !== 0) {
+    return evidenceDelta;
+  }
+
+  const confidenceDelta = right.confidence - left.confidence;
+  if (confidenceDelta !== 0) {
+    return confidenceDelta;
+  }
+
+  return (right.lastSeen || "").localeCompare(left.lastSeen || "");
+}
+
+function selfModelNodeWeight(type: AgentContextSynthesisNode["type"]): number {
+  if (type === "agent_instruction") {
+    return 50;
+  }
+  if (type === "pattern" || type === "principle" || type === "preference") {
+    return 40;
+  }
+  if (type === "decision") {
+    return 30;
+  }
+  if (type === "project" || type === "task") {
+    return 20;
+  }
+  return 0;
 }
 
 function estimateImportCostUsd(
@@ -447,14 +577,22 @@ function estimateImportCostUsd(
   selectedConversationCount: number,
   settings: PersonalContextGraphSettings
 ): CostEstimate {
+  const extractionPasses = settings.enableSelfModelExtraction ? 2 : 1;
+  const synthesisInputTokens =
+    SYNTHESIS_PROMPT_OVERHEAD_TOKENS_PER_IMPORT +
+    Math.ceil(estimatedTokens * SYNTHESIS_INPUT_TOKEN_RATIO);
+  const synthesisOutputTokens = Math.ceil(estimatedTokens * SYNTHESIS_OUTPUT_TOKEN_RATIO);
   const extractionInputTokens =
-    estimatedTokens * (settings.enableSelfModelExtraction ? 2 : 1) +
+    estimatedTokens * extractionPasses +
     selectedConversationCount *
       (EXTRACTION_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION +
-        (settings.enableSelfModelExtraction ? SELF_MODEL_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION : 0));
-  const extractionOutputTokens = Math.ceil(estimatedTokens * STRUCTURED_OUTPUT_TOKEN_RATIO);
+        (settings.enableSelfModelExtraction ? SELF_MODEL_PROMPT_OVERHEAD_TOKENS_PER_CONVERSATION : 0)) +
+    synthesisInputTokens;
+  const extractionOutputTokens =
+    Math.ceil(estimatedTokens * STRUCTURED_OUTPUT_TOKEN_RATIO * extractionPasses) +
+    synthesisOutputTokens;
   const embeddingTokens = Math.ceil(estimatedTokens * EMBEDDING_TOKEN_RATIO);
-  const extractionPrice = extractionModelPrice(settings);
+  const extractionPrice = extractionModelPrice(settings.extractionModel, settings);
   const embeddingPrice = embeddingModelPrice(settings.embeddingModel);
   const extractionCostUsd =
     (extractionInputTokens / 1_000_000) * extractionPrice.inputUsdPer1M +
@@ -526,23 +664,6 @@ function strongestInferenceLevel(
   return items.some((item) => item.inferenceLevel === "explicit")
     ? "explicit"
     : items.find((item) => item.inferenceLevel)?.inferenceLevel;
-}
-
-function extractionModelPrice(settings: PersonalContextGraphSettings): TokenPrice {
-  const model = settings.extractionModel.trim();
-  const knownPrice = EXTRACTION_MODEL_PRICES[model];
-  if (knownPrice) {
-    return knownPrice;
-  }
-
-  return {
-    inputUsdPer1M: settings.estimatedExtractionCostPer1MInputTokensUsd,
-    outputUsdPer1M: settings.estimatedExtractionCostPer1MInputTokensUsd * 6
-  };
-}
-
-function embeddingModelPrice(model: string): number {
-  return EMBEDDING_MODEL_PRICES_USD_PER_1M[model.trim()] || EMBEDDING_MODEL_PRICES_USD_PER_1M["text-embedding-3-large"];
 }
 
 function sanitizeSettingsSnapshot(

@@ -1,10 +1,12 @@
 import { requestUrl } from "obsidian";
 import type {
   AIProvider,
+  ApiUsageEvent,
   Evidence,
   ExtractedContext,
   ExtractedContextItem,
   ParsedConversation,
+  SynthesizeAgentContextArgs,
   SynthesizeSummaryArgs
 } from "../types";
 import type { PersonalContextGraphSettings } from "../settings";
@@ -12,6 +14,7 @@ import { conversationToPrompt } from "../conversationText";
 import { nowIso } from "../text";
 import { CONTEXT_NODE_LABEL } from "../types";
 import {
+  AGENT_CONTEXT_SYSTEM_PROMPT,
   EXTRACTION_SYSTEM_PROMPT,
   NODE_SYNTHESIS_SYSTEM_PROMPT,
   SELF_MODEL_SYSTEM_PROMPT
@@ -29,6 +32,7 @@ interface OpenAIOutputItem {
 interface OpenAIResponseBody {
   output_text?: string;
   output?: OpenAIOutputItem[];
+  usage?: OpenAIUsage;
   error?: {
     message?: string;
   };
@@ -38,15 +42,36 @@ interface OpenAIEmbeddingBody {
   data?: Array<{
     embedding?: number[];
   }>;
+  usage?: OpenAIUsage;
   error?: {
     message?: string;
   };
 }
 
+interface OpenAIUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+}
+
 const OPENAI_REQUEST_TIMEOUT_MS = 180_000;
+const BATCH_NODE_SYNTHESIS_SYSTEM_PROMPT = [
+  "You write calibrated summaries for multiple nodes in a personal context graph.",
+  "For each item, produce one or two concise sentences with the same meaning and style as the single-node summary task.",
+  "Use the supplied key exactly. Do not invent keys, labels, or evidence.",
+  "Return only JSON matching the schema."
+].join(" ");
 
 export class OpenAIProvider implements AIProvider {
+  private readonly usageEvents: ApiUsageEvent[] = [];
+
   constructor(private readonly settings: PersonalContextGraphSettings) {}
+
+  getUsageEvents(): ApiUsageEvent[] {
+    return [...this.usageEvents];
+  }
 
   async extractContext(conversation: ParsedConversation): Promise<ExtractedContext> {
     if (!this.settings.openAiApiKey.trim()) {
@@ -107,6 +132,7 @@ export class OpenAIProvider implements AIProvider {
       throw new Error("OpenAI extraction returned no structured output.");
     }
 
+    this.recordUsage("context_extraction", this.settings.extractionModel, body.usage);
     return normalizeExtractedContext(JSON.parse(outputText), conversation);
   }
 
@@ -180,6 +206,7 @@ export class OpenAIProvider implements AIProvider {
       throw new Error("OpenAI self-model extraction returned no structured output.");
     }
 
+    this.recordUsage("self_model_extraction", this.settings.extractionModel, body.usage);
     return normalizeExtractedSelfModel(JSON.parse(outputText));
   }
 
@@ -230,10 +257,148 @@ export class OpenAIProvider implements AIProvider {
 
     const body = response.json as OpenAIResponseBody;
     if (response.status >= 400 || body.error) {
-      throw new Error(formatOpenAiError("extraction", response.status, body));
+      throw new Error(formatOpenAiError("synthesis", response.status, body));
     }
 
+    this.recordUsage("node_summary_synthesis", this.settings.extractionModel, body.usage);
     return extractOutputText(body).trim();
+  }
+
+  async synthesizeSummariesBatch(
+    args: SynthesizeSummaryArgs[]
+  ): Promise<Array<{ key: string; summary: string }>> {
+    if (!this.settings.openAiApiKey.trim()) {
+      throw new Error("OpenAI API key is required before synthesizing summaries.");
+    }
+
+    const items = args
+      .filter((arg) => arg.evidenceQuotes.length > 0)
+      .map((arg) => ({
+        key: arg.key || `${arg.type}:${arg.label}`,
+        type: CONTEXT_NODE_LABEL[arg.type],
+        label: arg.label,
+        evidenceQuotes: arg.evidenceQuotes.slice(0, 12)
+      }));
+
+    if (items.length === 0) {
+      return [];
+    }
+
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.extractionModel,
+          input: [
+            {
+              role: "system",
+              content: [{ type: "input_text", text: BATCH_NODE_SYNTHESIS_SYSTEM_PROMPT }]
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: [
+                    "Write summaries for each node. Return the same key with each summary.",
+                    JSON.stringify({ items })
+                  ].join("\n\n")
+                }
+              ]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "personal_context_graph_node_summary_batch",
+              strict: true,
+              schema: BATCH_NODE_SUMMARY_SCHEMA
+            }
+          }
+        })
+      },
+      "batch node summary synthesis"
+    );
+
+    const body = response.json as OpenAIResponseBody;
+    if (response.status >= 400 || body.error) {
+      throw new Error(formatOpenAiError("synthesis", response.status, body));
+    }
+
+    const outputText = extractOutputText(body);
+    if (!outputText) {
+      throw new Error("OpenAI batch summary synthesis returned no structured output.");
+    }
+
+    this.recordUsage("node_summary_synthesis", this.settings.extractionModel, body.usage);
+    return normalizeBatchSummaryResponse(JSON.parse(outputText));
+  }
+
+  async synthesizeAgentContextProfile(args: SynthesizeAgentContextArgs): Promise<string> {
+    if (!this.settings.openAiApiKey.trim()) {
+      throw new Error("OpenAI API key is required before synthesizing agent context.");
+    }
+
+    const payload = {
+      identityPath: args.identityPath,
+      nodes: args.nodes.slice(0, 80),
+      sourceSummaries: args.sourceSummaries.slice(0, 30),
+      warnings: args.warnings.slice(0, 10)
+    };
+
+    const response = await requestOpenAi(
+      {
+        url: "https://api.openai.com/v1/responses",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.settings.openAiApiKey.trim()}`,
+          "Content-Type": "application/json"
+        },
+        throw: false,
+        body: JSON.stringify({
+          model: this.settings.extractionModel,
+          input: [
+            {
+              role: "system",
+              content: [{ type: "input_text", text: AGENT_CONTEXT_SYSTEM_PROMPT }]
+            },
+            {
+              role: "user",
+              content: [{ type: "input_text", text: JSON.stringify(payload) }]
+            }
+          ],
+          text: {
+            format: {
+              type: "json_schema",
+              name: "personal_context_graph_agent_context_profile",
+              strict: true,
+              schema: AGENT_CONTEXT_PROFILE_SCHEMA
+            }
+          }
+        })
+      },
+      "agent context synthesis"
+    );
+
+    const body = response.json as OpenAIResponseBody;
+    if (response.status >= 400 || body.error) {
+      throw new Error(formatOpenAiError("synthesis", response.status, body));
+    }
+
+    const outputText = extractOutputText(body);
+    if (!outputText) {
+      throw new Error("OpenAI agent context synthesis returned no structured output.");
+    }
+
+    this.recordUsage("agent_context_synthesis", this.settings.extractionModel, body.usage);
+    const parsed = asRecord(JSON.parse(outputText));
+    return asString(parsed.profileSummary).trim();
   }
 
   async embedText(text: string): Promise<number[]> {
@@ -268,7 +433,33 @@ export class OpenAIProvider implements AIProvider {
       throw new Error("OpenAI embedding returned no vector.");
     }
 
+    this.recordUsage("embedding", this.settings.embeddingModel, body.usage, true);
     return embedding;
+  }
+
+  private recordUsage(
+    phase: ApiUsageEvent["phase"],
+    model: string,
+    usage?: OpenAIUsage,
+    embedding = false
+  ): void {
+    if (!usage) {
+      return;
+    }
+
+    const inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
+    const totalTokens = usage.total_tokens || inputTokens + outputTokens;
+    this.usageEvents.push({
+      phase,
+      model,
+      inputTokens: embedding ? undefined : inputTokens,
+      outputTokens: embedding ? undefined : outputTokens,
+      embeddingTokens: embedding ? totalTokens || inputTokens : undefined,
+      totalTokens,
+      cached: false,
+      timestamp: nowIso()
+    });
   }
 }
 
@@ -300,7 +491,7 @@ async function requestOpenAi(
 }
 
 function formatOpenAiError(
-  phase: "extraction" | "embedding",
+  phase: "extraction" | "embedding" | "synthesis",
   status: number,
   body: OpenAIResponseBody | OpenAIEmbeddingBody
 ): string {
@@ -521,6 +712,35 @@ const SELF_MODEL_SCHEMA = {
   }
 };
 
+const BATCH_NODE_SUMMARY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["summaries"],
+  properties: {
+    summaries: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "summary"],
+        properties: {
+          key: { type: "string" },
+          summary: { type: "string" }
+        }
+      }
+    }
+  }
+};
+
+const AGENT_CONTEXT_PROFILE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["profileSummary"],
+  properties: {
+    profileSummary: { type: "string" }
+  }
+};
+
 function extractOutputText(body: OpenAIResponseBody): string {
   if (body.output_text) {
     return body.output_text;
@@ -573,6 +793,20 @@ function normalizeExtractedSelfModel(value: unknown): Partial<ExtractedContext> 
     decisions: normalizeItems(objectValue.decisions),
     stylePatterns: normalizeItems(objectValue.stylePatterns)
   };
+}
+
+function normalizeBatchSummaryResponse(value: unknown): Array<{ key: string; summary: string }> {
+  const objectValue = asRecord(value);
+  const summaries = Array.isArray(objectValue.summaries) ? objectValue.summaries : [];
+  return summaries
+    .map((item) => {
+      const record = asRecord(item);
+      return {
+        key: asString(record.key).trim(),
+        summary: asString(record.summary).trim()
+      };
+    })
+    .filter((item) => item.key && item.summary);
 }
 
 function normalizeItems(value: unknown): ExtractedContextItem[] {

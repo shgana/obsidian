@@ -32,7 +32,8 @@ const AGENT_CONTEXT_NODE_ORDER: ContextNodeType[] = [
 export function createGraphFileDrafts(
   inputs: ConversationExtraction[],
   graph: BuiltContextGraph,
-  settings: PersonalContextGraphSettings
+  settings: PersonalContextGraphSettings,
+  agentContextProfileSummary?: string
 ): FileDraft[] {
   const drafts: FileDraft[] = [];
 
@@ -67,7 +68,7 @@ export function createGraphFileDrafts(
   } else {
     drafts.push({
       path: buildAgentContextPath(settings),
-      content: renderAgentContext(inputs, graph, settings),
+      content: renderAgentContext(inputs, graph, settings, agentContextProfileSummary),
       managed: true
     });
   }
@@ -407,7 +408,8 @@ function renderReviewQueueNote(item: ReviewQueueItem): string {
 function renderAgentContext(
   inputs: ConversationExtraction[],
   graph: BuiltContextGraph,
-  settings: PersonalContextGraphSettings
+  settings: PersonalContextGraphSettings,
+  agentContextProfileSummary?: string
 ): string {
   return [
     yamlFrontmatter({
@@ -425,7 +427,7 @@ function renderAgentContext(
     `${formatReference(buildIdentityPath(settings), "_Me", settings.linkAgentContextToGraph)} — protected user-owned profile note. Read this before applying inferred memory.`,
     "",
     "## Profile Summary",
-    renderProfileSummary(inputs),
+    agentContextProfileSummary?.trim() || renderProfileSummary(inputs),
     "",
     ...AGENT_CONTEXT_NODE_ORDER.flatMap((type) => [
       `## ${CONTEXT_NODE_PLURAL_LABEL[type]}`,
@@ -738,10 +740,14 @@ function formatDateMarker(value?: string): string {
 }
 
 function renderProfileSummary(inputs: ConversationExtraction[]): string {
-  const summaries = inputs
-    .sort((left, right) => right.extraction.confidence - left.extraction.confidence)
-    .slice(0, 12)
-    .map((input) => `- ${input.extraction.summary}`);
+  const summaries = uniqueStrings(
+    inputs
+      .sort((left, right) => right.extraction.confidence - left.extraction.confidence)
+      .map((input) => input.extraction.summary.trim())
+      .filter(Boolean)
+  )
+    .slice(0, 6)
+    .map((summary) => `- ${summary}`);
 
   return summaries.length > 0 ? summaries.join("\n") : "No high-confidence context extracted yet.";
 }

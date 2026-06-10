@@ -26,6 +26,8 @@ export interface PersonalContextGraphSettings {
   agentContextSections: boolean;
   visualGraphDefaultsVersion: number;
   enableSelfModelExtraction: boolean;
+  enableImportCache: boolean;
+  synthesizeAgentContextProfile: boolean;
   estimatedExtractionCostPer1MInputTokensUsd: number;
 }
 
@@ -55,5 +57,7 @@ export const DEFAULT_SETTINGS: PersonalContextGraphSettings = {
   agentContextSections: false,
   visualGraphDefaultsVersion: 2,
   enableSelfModelExtraction: true,
+  enableImportCache: true,
+  synthesizeAgentContextProfile: true,
   estimatedExtractionCostPer1MInputTokensUsd: 0.25
 };

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_CONTEXT_SYSTEM_PROMPT,
   EXTRACTION_SYSTEM_PROMPT,
   NODE_SYNTHESIS_SYSTEM_PROMPT,
   SELF_MODEL_SYSTEM_PROMPT
@@ -43,5 +44,14 @@ describe("Self-model extraction prompt", () => {
     expect(SELF_MODEL_SYSTEM_PROMPT).toContain("Agent instructions");
     expect(SELF_MODEL_SYSTEM_PROMPT).toContain("supported_inference");
     expect(SELF_MODEL_SYSTEM_PROMPT).toContain("review-worthy inference");
+  });
+});
+
+describe("Agent Context synthesis prompt", () => {
+  it("prioritizes LLM-facing self-model memory over surface topic summaries", () => {
+    expect(AGENT_CONTEXT_SYSTEM_PROMPT).toContain("agent-memory context pack");
+    expect(AGENT_CONTEXT_SYSTEM_PROMPT).toContain("communication style");
+    expect(AGENT_CONTEXT_SYSTEM_PROMPT).toContain("patterns, principles, preferences");
+    expect(AGENT_CONTEXT_SYSTEM_PROMPT).toContain("Deduplicate aggressively");
   });
 });

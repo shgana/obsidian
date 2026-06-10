@@ -1510,6 +1510,7 @@ async function synthesizeNodeSummaries(
   }
 
   const minEvidence = Math.max(1, settings.synthesizeNodeSummaryMinEvidence);
+  const targets: Array<{ node: GraphNode; args: Parameters<AIProvider["synthesizeSummary"]>[0] }> = [];
 
   for (const node of graph.nodes) {
     if (node.evidence.length < minEvidence) {
@@ -1528,24 +1529,56 @@ async function synthesizeNodeSummaries(
       continue;
     }
 
-    try {
-      const synthesized = await provider.synthesizeSummary({
+    targets.push({
+      node,
+      args: {
+        key: node.id,
         type: node.type,
         label: node.label,
         evidenceQuotes: quotes
-      });
-
-      const cleaned = synthesized.replace(/\s+/g, " ").trim();
-      if (cleaned) {
-        node.summary = cleaned.slice(0, 600);
       }
+    });
+  }
+
+  if (targets.length === 0) {
+    return;
+  }
+
+  if (provider.synthesizeSummariesBatch) {
+    try {
+      const results = await provider.synthesizeSummariesBatch(targets.map((target) => target.args));
+      const summariesByKey = new Map(results.map((result) => [result.key, result.summary]));
+      for (const target of targets) {
+        applySynthesizedSummary(target.node, summariesByKey.get(target.args.key || target.node.id) || "");
+      }
+      return;
     } catch (error) {
       graph.warnings.push(
-        `Summary synthesis skipped for "${node.label}": ${
+        `Batch summary synthesis failed; falling back to individual summaries: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
     }
+  }
+
+  for (const target of targets) {
+    try {
+      const synthesized = await provider.synthesizeSummary(target.args);
+      applySynthesizedSummary(target.node, synthesized);
+    } catch (error) {
+      graph.warnings.push(
+        `Summary synthesis skipped for "${target.node.label}": ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+}
+
+function applySynthesizedSummary(node: GraphNode, synthesized: string): void {
+  const cleaned = synthesized.replace(/\s+/g, " ").trim();
+  if (cleaned) {
+    node.summary = cleaned.slice(0, 600);
   }
 }
 

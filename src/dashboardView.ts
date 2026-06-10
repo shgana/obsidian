@@ -9,6 +9,7 @@ export interface DashboardHost {
   openImportModal(): void;
   rebuildGeneratedGraph(): Promise<void>;
   exportAgentContextPack(): Promise<void>;
+  clearImportCache(): Promise<void>;
 }
 
 export class ContextGraphDashboardView extends ItemView {
@@ -48,6 +49,11 @@ export class ContextGraphDashboardView extends ItemView {
         button
           .setButtonText("Export agent context")
           .onClick(() => void this.host.exportAgentContextPack())
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Clear cache")
+          .onClick(() => void this.host.clearImportCache())
       );
 
     renderImportStatus(container, this.host.importRunState, this.host.checkpoint);
@@ -152,12 +158,30 @@ function isCheckpointStaleAfterAttempt(
   return checkpoint.createdAt < state.lastImportStartedAt;
 }
 
-function renderReport(container: HTMLElement, report: GraphBuildReport): void {
+export function renderReport(container: HTMLElement, report: GraphBuildReport): void {
   container.createEl("h3", { text: "Last Import" });
   const list = container.createEl("ul");
   list.createEl("li", {
     text: `Processed conversations: ${report.processedConversationCount}`
   });
+  list.createEl("li", {
+    text: `Estimated API cost: $${report.estimatedCostUsd.toFixed(4)}`
+  });
+  if (report.actualCostUsd !== undefined) {
+    list.createEl("li", {
+      text: `Actual estimated API cost: $${report.actualCostUsd.toFixed(4)}`
+    });
+  }
+  if (report.actualTotalTokens !== undefined) {
+    list.createEl("li", {
+      text: `Actual tokens: ${report.actualTotalTokens} total (${report.actualInputTokens || 0} input, ${report.actualOutputTokens || 0} output, ${report.actualEmbeddingTokens || 0} embedding)`
+    });
+  }
+  if (report.cacheHitCount !== undefined || report.cacheMissCount !== undefined) {
+    list.createEl("li", {
+      text: `Cache: ${report.cacheHitCount ?? 0} hits, ${report.cacheMissCount ?? 0} misses`
+    });
+  }
   list.createEl("li", {
     text: `Graph edges: ${report.edgeCount}`
   });
@@ -253,6 +277,19 @@ function renderReport(container: HTMLElement, report: GraphBuildReport): void {
     const warningList = container.createEl("ul");
     for (const warning of report.warnings) {
       warningList.createEl("li", { text: warning });
+    }
+  }
+
+  if (report.apiUsageByPhase && Object.keys(report.apiUsageByPhase).length > 0) {
+    container.createEl("h3", { text: "API Usage By Phase" });
+    const usageList = container.createEl("ul");
+    for (const [phase, usage] of Object.entries(report.apiUsageByPhase)) {
+      if (!usage) {
+        continue;
+      }
+      usageList.createEl("li", {
+        text: `${phase}: ${usage.calls} calls, ${usage.cacheHits} cache hits, ${usage.totalTokens} tokens, $${usage.estimatedCostUsd.toFixed(4)}`
+      });
     }
   }
 }

@@ -462,6 +462,107 @@ describe("context graph builder", () => {
     expect(obsidian!.summary).toBe("Synthesized summary for Obsidian.");
   });
 
+  it("uses batch summary synthesis when the provider supports it", async () => {
+    let batchCalls = 0;
+    let individualCalls = 0;
+    const batchProvider: AIProvider = {
+      ...provider,
+      async synthesizeSummary(): Promise<string> {
+        individualCalls += 1;
+        return "Individual summary.";
+      },
+      async synthesizeSummariesBatch(args): Promise<Array<{ key: string; summary: string }>> {
+        batchCalls += 1;
+        return args.map((arg) => ({
+          key: arg.key || arg.label,
+          summary: `Batch summary for ${arg.label}.`
+        }));
+      }
+    };
+
+    const seedItem = {
+      label: "Obsidian",
+      summary: "Initial summary.",
+      confidence: 0.96,
+      evidence: [
+        { quote: "Use Obsidian for memory.", turnRole: "user" as const, confidence: 0.96 }
+      ]
+    };
+    const inputs = ["a", "b", "c"].map((suffix) => {
+      const input = extractionInput(`conv-batch-${suffix}`, suffix, "ignored", 0.96);
+      input.extraction.topics = [
+        {
+          ...seedItem,
+          evidence: [
+            {
+              quote: `Obsidian evidence ${suffix}.`,
+              turnRole: "user" as const,
+              confidence: 0.96
+            }
+          ]
+        }
+      ];
+      return input;
+    });
+
+    const graph = await buildContextGraph(
+      inputs,
+      { ...DEFAULT_SETTINGS, synthesizeNodeSummaryMinEvidence: 3 },
+      batchProvider
+    );
+
+    expect(batchCalls).toBe(1);
+    expect(individualCalls).toBe(0);
+    expect(graph.nodes.find((node) => node.label === "Obsidian")?.summary).toBe(
+      "Batch summary for Obsidian."
+    );
+  });
+
+  it("falls back to individual summary synthesis when batch synthesis fails", async () => {
+    let individualCalls = 0;
+    const fallbackProvider: AIProvider = {
+      ...provider,
+      async synthesizeSummary(args): Promise<string> {
+        individualCalls += 1;
+        return `Fallback summary for ${args.label}.`;
+      },
+      async synthesizeSummariesBatch(): Promise<Array<{ key: string; summary: string }>> {
+        throw new Error("batch unavailable");
+      }
+    };
+
+    const inputs = ["a", "b", "c"].map((suffix) => {
+      const input = extractionInput(`conv-fallback-${suffix}`, suffix, "ignored", 0.96);
+      input.extraction.topics = [
+        {
+          label: "Obsidian",
+          summary: "Initial summary.",
+          confidence: 0.96,
+          evidence: [
+            {
+              quote: `Obsidian evidence ${suffix}.`,
+              turnRole: "user" as const,
+              confidence: 0.96
+            }
+          ]
+        }
+      ];
+      return input;
+    });
+
+    const graph = await buildContextGraph(
+      inputs,
+      { ...DEFAULT_SETTINGS, synthesizeNodeSummaryMinEvidence: 3 },
+      fallbackProvider
+    );
+
+    expect(individualCalls).toBe(1);
+    expect(graph.nodes.find((node) => node.label === "Obsidian")?.summary).toBe(
+      "Fallback summary for Obsidian."
+    );
+    expect(graph.warnings.some((warning) => warning.includes("Batch summary synthesis failed"))).toBe(true);
+  });
+
   it("absorbs medium-confidence items into existing seeded canonical nodes", async () => {
     const seed: CanonicalNodeSeed = {
       type: "topic",

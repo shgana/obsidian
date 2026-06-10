@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MockElement } from "./mocks/obsidian";
-import { renderImportStatus } from "../src/dashboardView";
+import { renderImportStatus, renderReport } from "../src/dashboardView";
 import type { ImportCheckpoint, ImportRunState } from "../src/types";
 
 describe("dashboard import status", () => {
@@ -59,6 +59,43 @@ describe("dashboard import status", () => {
     expect(text).toContain("Status: succeeded");
     expect(text).toContain("Completed: 2026-06-04T12:03:00.000Z");
     expect(text).not.toContain("latest import attempt is newer than the saved checkpoint");
+  });
+});
+
+describe("dashboard import report", () => {
+  it("shows actual usage and cache metadata when available", () => {
+    const container = new MockElement("div");
+    const report = checkpoint("2026-06-04T12:03:00.000Z").report;
+    report.processedConversationCount = 20;
+    report.estimatedCostUsd = 1.5;
+    report.actualCostUsd = 0.12;
+    report.actualInputTokens = 1000;
+    report.actualOutputTokens = 200;
+    report.actualEmbeddingTokens = 300;
+    report.actualTotalTokens = 1500;
+    report.cacheHitCount = 40;
+    report.cacheMissCount = 5;
+    report.apiUsageByPhase = {
+      context_extraction: {
+        calls: 2,
+        cacheHits: 18,
+        cacheMisses: 2,
+        inputTokens: 1000,
+        outputTokens: 200,
+        embeddingTokens: 0,
+        totalTokens: 1200,
+        estimatedCostUsd: 0.1
+      }
+    };
+
+    renderReport(container as never, report);
+
+    const text = allText(container);
+    expect(text).toContain("Estimated API cost: $1.5000");
+    expect(text).toContain("Actual estimated API cost: $0.1200");
+    expect(text).toContain("Actual tokens: 1500 total");
+    expect(text).toContain("Cache: 40 hits, 5 misses");
+    expect(text).toContain("context_extraction: 2 calls, 18 cache hits, 1200 tokens, $0.1000");
   });
 });
 
