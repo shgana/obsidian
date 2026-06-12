@@ -669,7 +669,7 @@ describe("context graph builder", () => {
     const projectLabels = [projects[0]?.label, ...(projects[0]?.aliases || [])];
 
     expect(projects).toHaveLength(1);
-    expect(projectLabels).toContain("AI scan evaluation improvement project");
+    expect(projectLabels).toContain("Scann / Scanis");
     expect(projectLabels).toContain("BodyScanner fitness AI feature");
     expect(graph.sourceLinksById["conv-project-variants"].project).toHaveLength(1);
   });
@@ -726,7 +726,7 @@ describe("context graph builder", () => {
     expect(graph.nodes.filter((node) => node.type === "project")).toHaveLength(0);
     expect(graph.sourceLinksById["conv-phone"].project || []).toHaveLength(0);
     expect(graph.stats.rejectedProjectCandidates).toBe(1);
-    expect(graph.stats.filteredSeedAliases).toBe(1);
+    expect(graph.stats.filteredSeedAliases).toBe(0);
   });
 
   it("rebuilds activated project seed metadata from current compatible evidence", async () => {
@@ -754,7 +754,7 @@ describe("context graph builder", () => {
     const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider, [duolingoSeed]);
     const project = graph.nodes.find((node) => node.type === "project");
 
-    expect(project?.label).toBe("Duolingo-style AI learning app");
+    expect(project?.label).toBe("AiLingo / AI Learning App");
     expect(project?.aliases).toContain("AI/Duolingo-style app");
     expect(project?.aliases).not.toContain("Choosing a family phone plan");
     expect(project?.sourceIds).toEqual(["conv-duo"]);
@@ -799,9 +799,67 @@ describe("context graph builder", () => {
     const projects = graph.nodes.filter((node) => node.type === "project");
 
     expect(projects).toHaveLength(1);
-    expect(projects[0].label).toBe("Duolingo-style AI learning app");
+    expect(projects[0].label).toBe("AiLingo / AI Learning App");
     expect(projects[0].aliases).not.toContain("AI learning app UX design");
-    expect(graph.sourceLinksById["conv-ux"].project?.[0].label).toBe("Duolingo-style AI learning app");
+    expect(graph.sourceLinksById["conv-ux"].project?.[0].label).toBe("AiLingo / AI Learning App");
+    expect(graph.stats.projectEvidenceCandidates).toBe(1);
+  });
+
+  it("merges AiLingo project variants into one durable project", async () => {
+    const graph = await buildContextGraph(
+      [
+        projectInput("conv-ailingo-1", "AiLingo product build", [
+          graphItem(
+            "AiLingo product build",
+            "Build the AiLingo product as an AI learning app.",
+            0.99
+          )
+        ]),
+        projectInput("conv-ailingo-2", "Gamified AI learning B2C app", [
+          graphItem(
+            "Gamified AI learning B2C app",
+            "A B2C AI learning app with gamified product loops.",
+            0.98
+          )
+        ])
+      ],
+      DEFAULT_SETTINGS,
+      provider
+    );
+
+    const projects = graph.nodes.filter((node) => node.type === "project");
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0].label).toBe("AiLingo / AI Learning App");
+    expect(projects[0].aliases).toContain("AiLingo product build");
+    expect(projects[0].aliases).toContain("Gamified AI learning B2C app");
+  });
+
+  it("attaches AI Accuracy Improvement to Scann as subsystem evidence", async () => {
+    const scannSeed = seed("project", "Scann / Scanis", 0.99, ["old-scann"]);
+    scannSeed.summary = "A durable Scann fitness project for body scan evaluation and workout generation.";
+
+    const graph = await buildContextGraph(
+      [
+        projectInput("conv-accuracy", "AI Accuracy Improvement", [
+          graphItem(
+            "AI Accuracy Improvement",
+            "Improve Scann AI body-scan evaluation accuracy, benchmark logic, and workout recommendations.",
+            0.99
+          )
+        ])
+      ],
+      DEFAULT_SETTINGS,
+      provider,
+      [scannSeed]
+    );
+
+    const projects = graph.nodes.filter((node) => node.type === "project");
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0].label).toBe("Scann / Scanis");
+    expect(projects[0].aliases).not.toContain("AI Accuracy Improvement");
+    expect(graph.sourceLinksById["conv-accuracy"].project?.[0].label).toBe("Scann / Scanis");
     expect(graph.stats.projectEvidenceCandidates).toBe(1);
   });
 
@@ -939,6 +997,83 @@ describe("context graph builder", () => {
     expect(graph.reviewQueueItems[0].status).toBe("pending");
   });
 
+  it("keeps single-source agent instructions review-only even when explicit", async () => {
+    const input = extractionInput("conv-agent-review", "Output style", "placeholder", 0.4);
+    input.extraction.topics = [];
+    input.extraction.agentInstructions = [
+      {
+        label: "Be concise and directly useful",
+        summary: "The user explicitly asks for concise useful output.",
+        confidence: 0.97,
+        stability: "stable",
+        inferenceLevel: "explicit",
+        appliesTo: ["writing"],
+        agentInstruction: "Keep answers concise and directly useful.",
+        evidence: [
+          {
+            quote: "be concise and directly useful",
+            turnRole: "user",
+            confidence: 0.97
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes.filter((node) => node.type === "agent_instruction")).toHaveLength(0);
+    expect(graph.reviewQueueItems).toHaveLength(1);
+    expect(graph.reviewQueueItems[0].reviewPriority).toBe("high");
+  });
+
+  it("promotes explicit high-confidence durable preferences from one source", async () => {
+    const input = extractionInput("conv-explicit-pref", "Output schema", "placeholder", 0.4);
+    input.extraction.topics = [];
+    input.extraction.preferences = [
+      {
+        label: "JSON over prose for model outputs",
+        summary: "The user explicitly prefers JSON outputs for model-facing responses.",
+        confidence: 0.97,
+        stability: "stable",
+        inferenceLevel: "explicit",
+        appliesTo: ["model outputs"],
+        agentInstruction: "Prefer strict JSON when the user asks for model-facing output.",
+        evidence: [
+          {
+            quote: "I want the AI outputs to be JSON",
+            turnRole: "user",
+            confidence: 0.97
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+
+    expect(graph.nodes.filter((node) => node.type === "preference")).toHaveLength(1);
+    expect(graph.reviewQueueItems).toHaveLength(0);
+  });
+
+  it("clusters near-duplicate review seeds into one grouped item", async () => {
+    const graph = await buildContextGraph(
+      [],
+      DEFAULT_SETTINGS,
+      provider,
+      {
+        nodeSeeds: [],
+        reviewSeeds: [
+          reviewSeed("pending", "preference", "Accuracy and consistency are top priorities"),
+          reviewSeed("pending", "preference", "accuracy and consistency over AI outputs")
+        ]
+      }
+    );
+
+    expect(graph.reviewQueueItems).toHaveLength(1);
+    expect(graph.reviewQueueItems[0].variantCount).toBeGreaterThan(1);
+    expect(graph.reviewQueueItems[0].variantLabels).toContain("accuracy and consistency over AI outputs");
+    expect(graph.stats.reviewQueueMergedVariants).toBeGreaterThan(0);
+  });
+
   it("promotes approved review items and suppresses rejected review items", async () => {
     const approvedInput = extractionInput("conv-approved-review", "UX references", "placeholder", 0.4);
     approvedInput.extraction.topics = [];
@@ -1021,7 +1156,22 @@ describe("context graph builder", () => {
       }
     ];
 
-    const graph = await buildContextGraph([input], DEFAULT_SETTINGS, provider);
+    const secondInput = extractionInput("conv-style-pattern-2", "Style request follow-up", "placeholder", 0.4);
+    secondInput.extraction.topics = [];
+    secondInput.extraction.stylePatterns = [
+      {
+        ...input.extraction.stylePatterns[0],
+        evidence: [
+          {
+            quote: "keep it concise but useful",
+            turnRole: "user",
+            confidence: 0.95
+          }
+        ]
+      }
+    ];
+
+    const graph = await buildContextGraph([input, secondInput], DEFAULT_SETTINGS, provider);
     const pattern = graph.nodes.find((node) => node.type === "pattern");
 
     expect(pattern?.label).toBe("Concise high-density writing");

@@ -133,7 +133,7 @@ export class OpenAIProvider implements AIProvider {
     }
 
     this.recordUsage("context_extraction", this.settings.extractionModel, body.usage);
-    return normalizeExtractedContext(JSON.parse(outputText), conversation);
+    return normalizeExtractedContext(parseOpenAiJson(outputText, "extraction"), conversation);
   }
 
   async extractSelfModel(
@@ -207,7 +207,7 @@ export class OpenAIProvider implements AIProvider {
     }
 
     this.recordUsage("self_model_extraction", this.settings.extractionModel, body.usage);
-    return normalizeExtractedSelfModel(JSON.parse(outputText));
+    return normalizeExtractedSelfModel(parseOpenAiJson(outputText, "self-model extraction"));
   }
 
   async synthesizeSummary(args: SynthesizeSummaryArgs): Promise<string> {
@@ -337,7 +337,7 @@ export class OpenAIProvider implements AIProvider {
     }
 
     this.recordUsage("node_summary_synthesis", this.settings.extractionModel, body.usage);
-    return normalizeBatchSummaryResponse(JSON.parse(outputText));
+    return normalizeBatchSummaryResponse(parseOpenAiJson(outputText, "batch summary synthesis"));
   }
 
   async synthesizeAgentContextProfile(args: SynthesizeAgentContextArgs): Promise<string> {
@@ -397,7 +397,7 @@ export class OpenAIProvider implements AIProvider {
     }
 
     this.recordUsage("agent_context_synthesis", this.settings.extractionModel, body.usage);
-    const parsed = asRecord(JSON.parse(outputText));
+    const parsed = asRecord(parseOpenAiJson(outputText, "agent context synthesis"));
     return asString(parsed.profileSummary).trim();
   }
 
@@ -483,11 +483,29 @@ async function requestOpenAi(
         }, OPENAI_REQUEST_TIMEOUT_MS);
       })
     ]);
+  } catch (error) {
+    if (isJsonParseError(error)) {
+      throw new Error(`OpenAI ${label} returned non-JSON response.`);
+    }
+    throw error;
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
     }
   }
+}
+
+function parseOpenAiJson(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`OpenAI ${label} returned non-JSON structured output.`);
+  }
+}
+
+function isJsonParseError(error: unknown): boolean {
+  return error instanceof SyntaxError ||
+    (error instanceof Error && /Unexpected token|JSON|not valid JSON/i.test(error.message));
 }
 
 function formatOpenAiError(

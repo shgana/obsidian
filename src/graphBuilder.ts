@@ -13,6 +13,7 @@ import {
   type GraphEdge,
   type GraphNode,
   type NodeEvidence,
+  type ReviewPriority,
   type ReviewQueueItem,
   type ReviewQueueSeed,
   type ReviewStatus
@@ -134,7 +135,12 @@ function buildReviewRegistry(reviewSeeds: ReviewQueueSeed[]): ReviewRegistry {
       continue;
     }
 
-    const keys = reviewKeys(seed.type, seed.label, seed.aliases, seed.summary);
+    const keys = reviewKeys(
+      seed.type,
+      seed.label,
+      uniqueStrings([...seed.aliases, ...(seed.variantLabels || [])]),
+      seed.summary
+    );
     for (const key of keys) {
       if (seed.status === "rejected") {
         rejectedKeys.add(key);
@@ -159,7 +165,7 @@ function reviewSeedToCanonicalSeed(seed: ReviewQueueSeed): CanonicalNodeSeed {
     id: `${seed.type}_${seed.slug || slugify(seed.label)}`,
     label: seed.label,
     slug: seed.slug || slugify(seed.label),
-    aliases: seed.aliases,
+    aliases: uniqueStrings([...seed.aliases, ...(seed.variantLabels || [])]),
     path: buildNodePath(seed.type, seed.label, seed.path.split("/").slice(0, -2).join("/") || "Context Graph"),
     summary: seed.summary,
     confidence: seed.confidence,
@@ -190,7 +196,12 @@ function reviewSeedToReviewQueueItem(seed: ReviewQueueSeed): ReviewQueueItem {
     inferenceLevel: seed.inferenceLevel,
     appliesTo: seed.appliesTo,
     agentInstruction: seed.agentInstruction,
-    status: seed.status
+    status: seed.status,
+    reviewPriority: seed.reviewPriority,
+    variantLabels: seed.variantLabels || [],
+    variantCount: seed.variantCount,
+    groupedSourceCount: seed.groupedSourceCount,
+    groupedEvidenceCount: seed.groupedEvidenceCount
   };
 }
 
@@ -399,10 +410,33 @@ export async function buildContextGraph(
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
   graph.reviewQueueItems = compactReviewQueueItems(graph.reviewQueueItems);
   graph.stats.reviewQueueItems = graph.reviewQueueItems.length;
+  graph.stats.reviewQueueGroups = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority !== "low"
+  ).length;
+  graph.stats.reviewQueueHighPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "high"
+  ).length;
+  graph.stats.reviewQueueMediumPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "medium"
+  ).length;
+  graph.stats.reviewQueueLowPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "low"
+  ).length;
+  graph.stats.reviewQueueMergedVariants = graph.reviewQueueItems.reduce(
+    (sum, item) => sum + Math.max(0, (item.variantCount || 1) - 1),
+    0
+  );
+  graph.stats.reviewQueueSummarizedCandidates = graph.reviewQueueItems
+    .filter((item) => item.reviewPriority === "low")
+    .reduce((sum, item) => sum + (item.variantCount || 1), 0);
   graph.reviewQueueItems.sort((left, right) => {
     const statusDelta = reviewStatusRank(left.status) - reviewStatusRank(right.status);
     if (statusDelta !== 0) {
       return statusDelta;
+    }
+    const priorityDelta = reviewPriorityRank(left.reviewPriority) - reviewPriorityRank(right.reviewPriority);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
     }
     return left.label.localeCompare(right.label);
   });
@@ -427,6 +461,12 @@ function createStats(): GraphBuildStats {
     underlinkedSources: 0,
     anchorCandidatesRejected: 0,
     reviewQueueItems: 0,
+    reviewQueueGroups: 0,
+    reviewQueueHighPriority: 0,
+    reviewQueueMediumPriority: 0,
+    reviewQueueLowPriority: 0,
+    reviewQueueMergedVariants: 0,
+    reviewQueueSummarizedCandidates: 0,
     promotedReviewItems: 0,
     suppressedReviewItems: 0,
     canonicalSelfModelNodes: 0,
@@ -921,8 +961,19 @@ function shouldPromoteCluster(
 
   if (SELF_MODEL_TYPES.has(cluster.type)) {
     const representative = chooseRepresentative(cluster.candidates);
+    const durableStability =
+      representative.item.stability === "stable" ||
+      representative.item.stability === "recurring";
+    const explicitDurableSingletonTypes = new Set<ContextNodeType>([
+      "preference",
+      "principle",
+      "decision"
+    ]);
     if (
+      sourceCount === 1 &&
+      explicitDurableSingletonTypes.has(cluster.type) &&
       representative.item.inferenceLevel === "explicit" &&
+      durableStability &&
       maxConfidence >= settings.singleSourcePromotionThreshold
     ) {
       return true;
@@ -930,9 +981,8 @@ function shouldPromoteCluster(
 
     if (
       sourceCount >= settings.minimumCanonicalSources &&
-      (representative.item.inferenceLevel === "explicit" ||
-        representative.item.stability === "stable" ||
-        representative.item.stability === "recurring")
+      durableStability &&
+      maxConfidence >= settings.confidenceThreshold
     ) {
       return true;
     }
@@ -993,7 +1043,7 @@ function createReviewQueueItem(
   const representative = chooseRepresentative(cluster.candidates);
   const label = canonicalLabelForType(cluster.type, representative.item.label, representative.item.summary);
   const slug = slugify(label);
-  const evidence = uniqueBy(
+  const allEvidence = uniqueBy(
     cluster.candidates.flatMap((candidate) =>
       candidate.item.evidence.map<NodeEvidence>((entry) => ({
         sourceId: candidate.sourceId,
@@ -1004,25 +1054,25 @@ function createReviewQueueItem(
       }))
     ),
     (entry) => `${entry.sourceId}:${entry.quote}`
-  )
-    .sort((left, right) => right.confidence - left.confidence)
-    .slice(0, 12);
+  ).sort((left, right) => right.confidence - left.confidence);
+  const sourceIds = uniqueStrings(cluster.candidates.map((candidate) => candidate.sourceId));
+  const variantLabels = uniqueStrings(
+    cluster.candidates
+      .map((candidate) => candidate.item.label)
+      .filter((value) => slugify(value) !== slug)
+  );
 
   return {
     id: `review_${cluster.type}_${slug}`,
     type: cluster.type,
     label,
     slug,
-    aliases: uniqueStrings(
-      cluster.candidates
-        .map((candidate) => candidate.item.label)
-        .filter((value) => slugify(value) !== slug)
-    ).slice(0, 8),
+    aliases: variantLabels.slice(0, 8),
     path: buildReviewQueuePath(outputFolder),
     summary: representative.item.summary,
     confidence: representative.item.confidence,
-    evidence,
-    sourceIds: uniqueStrings(cluster.candidates.map((candidate) => candidate.sourceId)),
+    evidence: allEvidence.slice(0, 12),
+    sourceIds,
     lastSeen:
       representative.input.conversation.updateTime ||
       representative.input.conversation.createTime ||
@@ -1031,7 +1081,19 @@ function createReviewQueueItem(
     inferenceLevel: representative.item.inferenceLevel,
     appliesTo: representative.item.appliesTo,
     agentInstruction: representative.item.agentInstruction,
-    status: "pending"
+    status: "pending",
+    reviewPriority: reviewPriorityForItem({
+      type: cluster.type,
+      confidence: representative.item.confidence,
+      stability: representative.item.stability,
+      inferenceLevel: representative.item.inferenceLevel,
+      sourceCount: sourceIds.length,
+      status: "pending"
+    }),
+    variantLabels,
+    variantCount: cluster.candidates.length,
+    groupedSourceCount: sourceIds.length,
+    groupedEvidenceCount: allEvidence.length
   };
 }
 
@@ -1040,37 +1102,179 @@ export function buildReviewQueuePath(outputFolder: string): string {
 }
 
 function compactReviewQueueItems(items: ReviewQueueItem[]): ReviewQueueItem[] {
-  const byKey = new Map<string, ReviewQueueItem>();
+  const grouped: ReviewQueueItem[] = [];
 
   for (const item of items) {
-    const key = reviewKeys(item.type, item.label, item.aliases, item.summary)[0] ||
-      `${item.type}:${slugify(item.label)}`;
-    const existing = byKey.get(key);
+    const normalized = normalizeReviewQueueItem(item);
+    const existing = grouped.find((candidate) => shouldMergeReviewItems(candidate, normalized));
     if (!existing) {
-      byKey.set(key, { ...item });
+      grouped.push(normalized);
       continue;
     }
 
-    const preferred = reviewStatusRank(item.status) < reviewStatusRank(existing.status) ||
-      item.confidence > existing.confidence
-      ? item
-      : existing;
-    byKey.set(key, {
-      ...preferred,
-      aliases: uniqueStrings([...existing.aliases, ...item.aliases]).slice(0, 12),
-      evidence: uniqueBy(
-        [...existing.evidence, ...item.evidence],
-        (entry) => `${entry.sourceId}:${entry.quote}`
-      )
-        .sort((left, right) => right.confidence - left.confidence)
-        .slice(0, 12),
-      sourceIds: uniqueStrings([...existing.sourceIds, ...item.sourceIds]),
-      lastSeen: maxStringDate(existing.lastSeen, item.lastSeen),
-      appliesTo: uniqueStrings([...(existing.appliesTo || []), ...(item.appliesTo || [])])
-    });
+    mergeReviewItemInto(existing, normalized);
   }
 
-  return [...byKey.values()];
+  return grouped.map((item) => ({
+    ...item,
+    reviewPriority: reviewPriorityForItem({
+      type: item.type,
+      confidence: item.confidence,
+      stability: item.stability,
+      inferenceLevel: item.inferenceLevel,
+      sourceCount: item.sourceIds.length,
+      status: item.status
+    })
+  }));
+}
+
+function normalizeReviewQueueItem(item: ReviewQueueItem): ReviewQueueItem {
+  const variantLabels = uniqueStrings([
+    ...(item.variantLabels || []),
+    ...item.aliases
+  ]).filter((label) => slugify(label) !== item.slug);
+
+  return {
+    ...item,
+    reviewPriority: item.reviewPriority || reviewPriorityForItem({
+      type: item.type,
+      confidence: item.confidence,
+      stability: item.stability,
+      inferenceLevel: item.inferenceLevel,
+      sourceCount: item.sourceIds.length,
+      status: item.status
+    }),
+    variantLabels,
+    variantCount: Math.max(item.variantCount || 1, variantLabels.length + 1),
+    groupedSourceCount: item.groupedSourceCount || item.sourceIds.length,
+    groupedEvidenceCount: item.groupedEvidenceCount || item.evidence.length
+  };
+}
+
+function mergeReviewItemInto(target: ReviewQueueItem, incoming: ReviewQueueItem): void {
+  const previousLabel = target.label;
+  const preferred = incoming.confidence > target.confidence ? incoming : target;
+  target.label = preferred.label;
+  target.slug = preferred.slug;
+  target.id = `review_${target.type}_${target.slug}`;
+  target.summary = preferred.summary;
+  target.confidence = Math.max(target.confidence, incoming.confidence);
+  target.status = mergeReviewStatus(target.status, incoming.status);
+  target.evidence = uniqueBy(
+    [...target.evidence, ...incoming.evidence],
+    (entry) => `${entry.sourceId}:${entry.quote}`
+  )
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, 12);
+  target.sourceIds = uniqueStrings([...target.sourceIds, ...incoming.sourceIds]);
+  target.lastSeen = maxStringDate(target.lastSeen, incoming.lastSeen);
+  target.appliesTo = uniqueStrings([...(target.appliesTo || []), ...(incoming.appliesTo || [])]).slice(0, 8);
+  if (!target.agentInstruction && incoming.agentInstruction) {
+    target.agentInstruction = incoming.agentInstruction;
+  }
+  target.stability = strongestStabilityValue(target.stability, incoming.stability);
+  target.inferenceLevel = strongestInferenceValue(target.inferenceLevel, incoming.inferenceLevel);
+  target.variantLabels = uniqueStrings([
+    previousLabel,
+    target.label,
+    incoming.label,
+    ...(target.variantLabels || []),
+    ...(incoming.variantLabels || []),
+    ...target.aliases,
+    ...incoming.aliases
+  ]).filter((label) => slugify(label) !== target.slug);
+  target.aliases = target.variantLabels.slice(0, 12);
+  target.variantCount = Math.max(
+    (target.variantCount || 1) + (incoming.variantCount || 1),
+    target.variantLabels.length + 1
+  );
+  target.groupedSourceCount = target.sourceIds.length;
+  target.groupedEvidenceCount = (target.groupedEvidenceCount || 0) + (incoming.groupedEvidenceCount || incoming.evidence.length);
+}
+
+function shouldMergeReviewItems(left: ReviewQueueItem, right: ReviewQueueItem): boolean {
+  if (left.type !== right.type) {
+    return false;
+  }
+
+  const leftKeys = new Set(reviewKeys(left.type, left.label, left.aliases, left.summary));
+  if (reviewKeys(right.type, right.label, right.aliases, right.summary).some((key) => leftKeys.has(key))) {
+    return true;
+  }
+
+  const leftTokens = reviewSignificantTokens([left.label, ...left.aliases, ...(left.variantLabels || [])].join(" "));
+  const rightTokens = reviewSignificantTokens([right.label, ...right.aliases, ...(right.variantLabels || [])].join(" "));
+  if (leftTokens.length < 2 || rightTokens.length < 2) {
+    return false;
+  }
+
+  const overlap = leftTokens.filter((token) => rightTokens.includes(token)).length;
+  const union = uniqueStrings([...leftTokens, ...rightTokens]).length;
+  return overlap >= 2 && overlap / union >= 0.25;
+}
+
+function reviewSignificantTokens(text: string): string[] {
+  const reviewStopWords = new Set([
+    "agent",
+    "answer",
+    "candidate",
+    "context",
+    "instruction",
+    "memory",
+    "output",
+    "pattern",
+    "preference",
+    "principle",
+    "review",
+    "user",
+    "uses",
+    "use",
+    "wants"
+  ]);
+  return significantTokens(text).filter((token) => !reviewStopWords.has(token)).slice(0, 8);
+}
+
+function mergeReviewStatus(left: ReviewStatus, right: ReviewStatus): ReviewStatus {
+  if (left === "rejected" || right === "rejected") {
+    return "rejected";
+  }
+  if (left === "approved" || right === "approved") {
+    return "approved";
+  }
+  return "pending";
+}
+
+function reviewPriorityForItem(args: {
+  type: ContextNodeType;
+  confidence: number;
+  stability?: ExtractedContextItem["stability"];
+  inferenceLevel?: ExtractedContextItem["inferenceLevel"];
+  sourceCount: number;
+  status: ReviewStatus;
+}): ReviewPriority {
+  if (args.status === "rejected") {
+    return "low";
+  }
+  if (
+    args.sourceCount >= 2 ||
+    (args.inferenceLevel === "explicit" &&
+      (args.stability === "stable" || args.stability === "recurring") &&
+      args.confidence >= 0.9)
+  ) {
+    return "high";
+  }
+  if (args.stability === "situational" || args.stability === "temporary" || args.confidence < 0.8) {
+    return "low";
+  }
+  return "medium";
+}
+
+function reviewPriorityRank(priority?: ReviewPriority): number {
+  return {
+    high: 0,
+    medium: 1,
+    low: 2
+  }[priority || "medium"];
 }
 
 function reviewStatusRank(status: ReviewStatus): number {
@@ -1278,6 +1482,10 @@ function buildNodePath(type: ContextNodeType, label: string, outputFolder: strin
 function canonicalLabelForType(type: ContextNodeType, label: string, summary: string): string {
   if (type === "project" && durableProjectDomainFromParts(label, summary) === "scann-fitness") {
     return "Scann / Scanis";
+  }
+
+  if (type === "project" && durableProjectDomainFromParts(label, summary) === "ai-learning-app") {
+    return "AiLingo / AI Learning App";
   }
 
   return label;
@@ -2102,7 +2310,10 @@ function projectDomainKey(text: string): ProjectDomainKey | undefined {
     return "phone-plan";
   }
 
-  if (hasAny("duolingo") || (hasAny("learning") && hasAny("startup", "tech", "stack"))) {
+  if (
+    hasAny("ailingo", "duolingo") ||
+    (hasAny("learning") && hasAny("app", "b2c", "mvp", "product", "startup", "tech", "stack"))
+  ) {
     return "ai-learning-app";
   }
 
@@ -2207,12 +2418,17 @@ function projectDomainFromParts(label: string, summary: string): ProjectDomainKe
     return labelDomain;
   }
 
+  const summaryDomain = projectDomainKey(summary);
+  if (summaryDomain) {
+    return summaryDomain;
+  }
+
   if (looksLikeGenericDurableProject(label, summary)) {
     const genericSlug = normalizedProjectLabelSlug(label) || slugify(label);
     return genericSlug ? `custom:${genericSlug}` : undefined;
   }
 
-  return projectDomainKey(summary);
+  return undefined;
 }
 
 function durableProjectDomainFromParts(label: string, summary: string): ProjectDomainKey | undefined {
@@ -2221,8 +2437,16 @@ function durableProjectDomainFromParts(label: string, summary: string): ProjectD
 }
 
 function isProjectEvidenceOnlyLabel(label: string, summary: string): boolean {
-  void summary;
+  const domain = projectDomainKey(label) || projectDomainKey(summary);
   const text = label;
+  if (
+    domain === "scann-fitness" &&
+    /\b(accuracy|benchmark|benchmarking|evaluation|funding|logic|pitch|posture|score|scoring|slide|slides)\b/i.test(text) &&
+    !/\b(scann|scanis|bodyscanner)\b/i.test(text)
+  ) {
+    return true;
+  }
+
   return /\b(analysis|assignment|breakdown|deck|deliverable|funding|outline|pitch|planning|query|reference|research|resume|slide|slides|stack|ux|writeup)\b/i.test(text);
 }
 

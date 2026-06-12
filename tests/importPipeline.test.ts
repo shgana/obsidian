@@ -264,8 +264,32 @@ describe("import pipeline", () => {
     expect(inbox?.content).toContain('pcg_type: "review_queue"');
     expect(inbox?.content).toContain("### Review: Reference-driven UX design");
     expect(inbox?.content).toContain("- **Status**: `pending`");
+    expect(inbox?.content).toContain("- **Priority**: `medium`");
     expect(inbox?.content).not.toContain("[[");
     expect(artifacts.report.reviewQueueItemCount).toBe(1);
+    expect(artifacts.report.reviewQueueGroupCount).toBe(1);
+  });
+
+  it("summarizes low-priority review candidates instead of rendering review chores", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      openAiApiKey: "test",
+      costCapUsd: 10,
+      outputFolder: "Context Graph"
+    };
+
+    const artifacts = await runImport(
+      [conversation("conv-low-review", "Low review test")],
+      settings,
+      lowPriorityReviewProvider
+    );
+    const inbox = artifacts.drafts.find((draft) => draft.path === "Context Graph/Review Queue.md");
+
+    expect(inbox?.content).toContain("## Low Priority Summary");
+    expect(inbox?.content).not.toContain("### Review: Product lookup response style");
+    expect(artifacts.report.reviewQueueItemCount).toBe(1);
+    expect(artifacts.report.reviewQueueGroupCount).toBe(0);
+    expect(artifacts.report.reviewQueueSummarizedCandidateCount).toBe(1);
   });
 
   it("still emits sectioned Agent Context files when explicitly enabled", async () => {
@@ -500,7 +524,7 @@ const reviewQueueProvider: AIProvider = {
         {
           label: "Reference-driven UX design",
           summary: "The user draws UX mechanics from proven consumer apps.",
-          confidence: 0.78,
+          confidence: 0.82,
           stability: "recurring",
           inferenceLevel: "supported_inference",
           appliesTo: ["product design", "onboarding"],
@@ -509,7 +533,35 @@ const reviewQueueProvider: AIProvider = {
             {
               quote: "I like Duolingo's lesson-first onboarding better.",
               turnRole: "user",
-              confidence: 0.78
+              confidence: 0.82
+            }
+          ]
+        }
+      ]
+    };
+  }
+};
+
+const lowPriorityReviewProvider: AIProvider = {
+  ...reviewQueueProvider,
+  async extractSelfModel(): Promise<Partial<ExtractedContext>> {
+    return {
+      summary: "The user made a one-off product lookup request.",
+      confidence: 0.74,
+      agentInstructions: [
+        {
+          label: "Product lookup response style",
+          summary: "The user may want product lookup responses to be direct and setup-oriented.",
+          confidence: 0.74,
+          stability: "situational",
+          inferenceLevel: "supported_inference",
+          appliesTo: ["product lookup"],
+          agentInstruction: "Answer terse product lookup requests with direct setup guidance.",
+          evidence: [
+            {
+              quote: "github copilot in xcode",
+              turnRole: "user",
+              confidence: 0.74
             }
           ]
         }

@@ -15,6 +15,7 @@ import { hashString, nowIso } from "./text";
 export const IMPORT_CACHE_VERSION = 1;
 export const EXTRACTION_PROMPT_VERSION = "base-extraction-v4";
 export const SELF_MODEL_PROMPT_VERSION = "self-model-v2";
+export const SELF_MODEL_CACHE_KEY_VERSION = 2;
 export const NODE_SUMMARY_PROMPT_VERSION = "node-summary-v1";
 export const AGENT_CONTEXT_PROMPT_VERSION = "agent-context-profile-v1";
 
@@ -102,11 +103,12 @@ export class CachedAIProvider implements AIProvider {
   async extractContext(conversation: ParsedConversation): Promise<ExtractedContext> {
     const key = extractionCacheKey(conversation, this.settings);
     const cached = this.cache.extraction[key];
-    if (cached?.value) {
+    if (isValidExtractionValue(cached?.value)) {
       this.stats.extractionHits += 1;
       this.recordCacheHit("context_extraction", this.settings.extractionModel);
       return clone(cached.value);
     }
+    delete this.cache.extraction[key];
 
     this.stats.extractionMisses += 1;
     const value = await this.inner.extractContext(conversation);
@@ -131,11 +133,12 @@ export class CachedAIProvider implements AIProvider {
 
     const key = selfModelCacheKey(conversation, baseExtraction, this.settings);
     const cached = this.cache.selfModel[key];
-    if (cached?.value) {
+    if (isValidSelfModelValue(cached?.value)) {
       this.stats.selfModelHits += 1;
       this.recordCacheHit("self_model_extraction", this.settings.extractionModel);
       return clone(cached.value);
     }
+    delete this.cache.selfModel[key];
 
     this.stats.selfModelMisses += 1;
     const value = await this.inner.extractSelfModel(conversation, baseExtraction);
@@ -145,6 +148,7 @@ export class CachedAIProvider implements AIProvider {
       transcriptHash: transcriptHash(conversation, this.settings.maxPromptChars),
       model: this.settings.extractionModel,
       promptVersion: SELF_MODEL_PROMPT_VERSION,
+      cacheKeyVersion: SELF_MODEL_CACHE_KEY_VERSION,
       value: clone(value)
     };
     return value;
@@ -153,11 +157,12 @@ export class CachedAIProvider implements AIProvider {
   async embedText(text: string): Promise<number[]> {
     const key = embeddingCacheKey(text, this.settings.embeddingModel);
     const cached = this.cache.embeddings[key];
-    if (cached?.vector) {
+    if (isValidEmbeddingVector(cached?.vector)) {
       this.stats.embeddingHits += 1;
       this.recordCacheHit("embedding", this.settings.embeddingModel);
       return [...cached.vector];
     }
+    delete this.cache.embeddings[key];
 
     this.stats.embeddingMisses += 1;
     const vector = await this.inner.embedText(text);
@@ -305,12 +310,13 @@ export function selfModelCacheKey(
   return hashString(
     stableStringify({
       kind: "self-model",
+      cacheKeyVersion: SELF_MODEL_CACHE_KEY_VERSION,
       sourceId: conversation.sourceId,
       transcriptHash: transcriptHash(conversation, settings.maxPromptChars),
       createTime: conversation.createTime || "",
       updateTime: conversation.updateTime || "",
       rawMessageCount: conversation.rawMessageCount,
-      baseExtractionHash: hashString(stableStringify(baseExtraction)),
+      baseSummaryHash: hashString(normalizeCacheText(baseExtraction.summary || "")),
       model: settings.extractionModel,
       promptVersion: SELF_MODEL_PROMPT_VERSION,
       maxPromptChars: settings.maxPromptChars
@@ -384,6 +390,39 @@ function stableStringify(value: unknown): string {
   }
 
   return JSON.stringify(value);
+}
+
+function normalizeCacheText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isValidExtractionValue(value: unknown): value is ExtractedContext {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Partial<ExtractedContext>;
+  return typeof record.summary === "string" &&
+    typeof record.confidence === "number" &&
+    Array.isArray(record.topics) &&
+    Array.isArray(record.entities) &&
+    Array.isArray(record.projects) &&
+    Array.isArray(record.preferences) &&
+    Array.isArray(record.decisions) &&
+    Array.isArray(record.tasks) &&
+    Array.isArray(record.artifacts) &&
+    typeof record.extractedAt === "string";
+}
+
+function isValidSelfModelValue(value: unknown): value is Partial<ExtractedContext> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Partial<ExtractedContext>;
+  return record.summary === undefined || typeof record.summary === "string";
+}
+
+function isValidEmbeddingVector(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "number");
 }
 
 function asRecord<T>(value: unknown): Record<string, T> {

@@ -78,6 +78,12 @@ describe("canonical index", () => {
         "pcg_confidence: 0.78",
         'pcg_stability: "recurring"',
         'pcg_inference_level: "supported_inference"',
+        'pcg_review_priority: "high"',
+        "pcg_variant_labels:",
+        '  - "Reference-led UX"',
+        "pcg_variant_count: 2",
+        "pcg_grouped_source_count: 1",
+        "pcg_grouped_evidence_count: 2",
         "pcg_applies_to:",
         '  - "product design"',
         "---",
@@ -99,6 +105,11 @@ describe("canonical index", () => {
     expect(seed?.label).toBe("Reference-driven UX design");
     expect(seed?.stability).toBe("recurring");
     expect(seed?.inferenceLevel).toBe("supported_inference");
+    expect(seed?.reviewPriority).toBe("high");
+    expect(seed?.variantLabels).toEqual(["Reference-led UX"]);
+    expect(seed?.variantCount).toBe(2);
+    expect(seed?.groupedSourceCount).toBe(1);
+    expect(seed?.groupedEvidenceCount).toBe(2);
     expect(seed?.appliesTo).toEqual(["product design"]);
     expect(seed?.evidence[0].sourceId).toBe("conv-ux");
   });
@@ -119,8 +130,13 @@ describe("canonical index", () => {
         "### Review: Reference-driven UX design",
         "- **ID**: `review_pattern_reference-driven-ux-design`",
         "- **Status**: `approved`",
+        "- **Priority**: `high`",
         "- **Target type**: `pattern`",
         "- **Confidence**: 0.78",
+        "- **Variant count**: 2",
+        "- **Variant labels**: Reference-led UX; UX reference pattern",
+        "- **Grouped sources**: 1",
+        "- **Grouped evidence**: 2",
         "- **Stability**: `recurring`",
         "- **Inference level**: `supported_inference`",
         "- **Applies to**: product design; onboarding",
@@ -156,6 +172,11 @@ describe("canonical index", () => {
     expect(seeds).toHaveLength(2);
     expect(seeds[0].status).toBe("approved");
     expect(seeds[0].type).toBe("pattern");
+    expect(seeds[0].reviewPriority).toBe("high");
+    expect(seeds[0].variantLabels).toEqual(["Reference-led UX", "UX reference pattern"]);
+    expect(seeds[0].variantCount).toBe(2);
+    expect(seeds[0].groupedSourceCount).toBe(1);
+    expect(seeds[0].groupedEvidenceCount).toBe(2);
     expect(seeds[0].appliesTo).toEqual(["product design", "onboarding"]);
     expect(seeds[0].agentInstruction).toBe("Translate proven app mechanics into concrete flow decisions.");
     expect(seeds[0].evidence[0].sourceId).toBe("conv-ux");

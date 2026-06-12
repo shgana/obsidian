@@ -3,8 +3,10 @@ import { runImport } from "../src/importPipeline";
 import {
   CachedAIProvider,
   createEmptyImportCacheState,
+  embeddingCacheKey,
   extractionCacheKey,
-  migrateImportCacheState
+  migrateImportCacheState,
+  selfModelCacheKey
 } from "../src/importCache";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import type { AIProvider, ExtractedContext, ParsedConversation } from "../src/types";
@@ -39,6 +41,27 @@ describe("import cache", () => {
     );
     expect(extractionCacheKey(base, settings)).not.toBe(
       extractionCacheKey(base, { ...settings, maxPromptChars: 12 })
+    );
+  });
+
+  it("self-model cache key ignores volatile extraction timestamps", () => {
+    const settings = { ...DEFAULT_SETTINGS, extractionModel: "gpt-5.4", maxPromptChars: 36000 };
+    const parsed = conversation("conv-self-key", "Self key");
+    const first = extraction(parsed);
+    const second = {
+      ...first,
+      extractedAt: "2026-06-11T00:00:00.000Z"
+    };
+    const changedSummary = {
+      ...first,
+      summary: "Different base summary sent to the self-model prompt."
+    };
+
+    expect(selfModelCacheKey(parsed, first, settings)).toBe(
+      selfModelCacheKey(parsed, second, settings)
+    );
+    expect(selfModelCacheKey(parsed, first, settings)).not.toBe(
+      selfModelCacheKey(parsed, changedSummary, settings)
     );
   });
 
@@ -109,6 +132,24 @@ describe("import cache", () => {
 
     expect(firstCountAfterFailure).toBe(2);
     expect(counts.extractContext).toBe(3);
+  });
+
+  it("treats malformed cached embeddings as cache misses", async () => {
+    const cache = createEmptyImportCacheState();
+    const counts = createCounts();
+    const settings = { ...DEFAULT_SETTINGS };
+    cache.embeddings[embeddingCacheKey("bad", settings.embeddingModel)] = {
+      createdAt: "2026-06-10T00:00:00.000Z",
+      textHash: "bad",
+      model: settings.embeddingModel,
+      vector: "not-a-vector" as never
+    };
+    const provider = new CachedAIProvider(countingProvider(counts), settings, cache);
+
+    await provider.embedText("bad");
+
+    expect(counts.embedText).toBe(1);
+    expect(provider.getCacheStats().embeddingMisses).toBe(1);
   });
 });
 

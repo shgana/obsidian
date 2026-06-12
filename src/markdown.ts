@@ -282,8 +282,14 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
     if (statusDelta !== 0) {
       return statusDelta;
     }
+    const priorityDelta = reviewPriorityRank(left.reviewPriority) - reviewPriorityRank(right.reviewPriority);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
     return left.label.localeCompare(right.label);
   });
+  const actionableItems = sortedItems.filter((item) => item.reviewPriority !== "low");
+  const lowPriorityItems = sortedItems.filter((item) => item.reviewPriority === "low");
 
   const lines = [
     yamlFrontmatter({
@@ -292,11 +298,13 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
       pcg_source: "personal-context-graph",
       pcg_managed: true,
       pcg_review_format: "inbox_v1",
-      pcg_review_item_count: sortedItems.length
+      pcg_review_item_count: sortedItems.length,
+      pcg_review_group_count: actionableItems.length,
+      pcg_review_low_priority_count: lowPriorityItems.length
     }),
     "# Review Queue",
     "",
-    "Review inferred self-model candidates before they become canonical memory. Change each item status to `approved` or `rejected`; leave uncertain items as `pending`.",
+    "Optional review surface for uncertain self-model memory. Change high/medium group status to `approved` or `rejected`; leave uncertain groups as `pending`.",
     ""
   ];
 
@@ -306,7 +314,7 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
   }
 
   for (const status of ["pending", "rejected"] as const) {
-    const statusItems = sortedItems.filter((item) => item.status === status);
+    const statusItems = actionableItems.filter((item) => item.status === status);
     if (statusItems.length === 0) {
       continue;
     }
@@ -319,6 +327,22 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
     }
   }
 
+  if (lowPriorityItems.length > 0) {
+    lines.push("## Low Priority Summary");
+    lines.push("");
+    lines.push(
+      `${lowPriorityItems.reduce((sum, item) => sum + (item.variantCount || 1), 0)} situational or low-confidence candidates were summarized instead of rendered as review chores.`
+    );
+    lines.push("");
+    for (const [type, typeItems] of groupReviewItemsByType(lowPriorityItems)) {
+      const examples = typeItems
+        .slice(0, 5)
+        .map((item) => item.label)
+        .join("; ");
+      lines.push(`- **${CONTEXT_NODE_LABEL[type]}**: ${typeItems.length} groups${examples ? `, e.g. ${examples}` : ""}.`);
+    }
+  }
+
   return lines.join("\n").trimEnd();
 }
 
@@ -327,8 +351,15 @@ function renderReviewQueueInboxItem(item: ReviewQueueItem): string[] {
     `### Review: ${item.label}`,
     `- **ID**: \`${item.id}\``,
     `- **Status**: \`${item.status}\``,
+    item.reviewPriority ? `- **Priority**: \`${item.reviewPriority}\`` : undefined,
     `- **Target type**: \`${item.type}\``,
     `- **Confidence**: ${round(item.confidence)}`,
+    item.variantCount && item.variantCount > 1 ? `- **Variant count**: ${item.variantCount}` : undefined,
+    item.variantLabels && item.variantLabels.length > 0
+      ? `- **Variant labels**: ${item.variantLabels.join("; ")}`
+      : undefined,
+    item.groupedSourceCount ? `- **Grouped sources**: ${item.groupedSourceCount}` : undefined,
+    item.groupedEvidenceCount ? `- **Grouped evidence**: ${item.groupedEvidenceCount}` : undefined,
     item.lastSeen ? `- **Last seen**: ${item.lastSeen}` : undefined,
     item.stability ? `- **Stability**: \`${item.stability}\`` : undefined,
     item.inferenceLevel ? `- **Inference level**: \`${item.inferenceLevel}\`` : undefined,
@@ -357,6 +388,24 @@ function reviewStatusRank(status: ReviewQueueItem["status"]): number {
   }[status];
 }
 
+function reviewPriorityRank(priority: ReviewQueueItem["reviewPriority"]): number {
+  return {
+    high: 0,
+    medium: 1,
+    low: 2
+  }[priority || "medium"];
+}
+
+function groupReviewItemsByType(items: ReviewQueueItem[]): Array<[ContextNodeType, ReviewQueueItem[]]> {
+  const groups = new Map<ContextNodeType, ReviewQueueItem[]>();
+  for (const item of items) {
+    const group = groups.get(item.type) || [];
+    group.push(item);
+    groups.set(item.type, group);
+  }
+  return [...groups.entries()].sort((left, right) => left[0].localeCompare(right[0]));
+}
+
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
@@ -381,7 +430,12 @@ function renderReviewQueueNote(item: ReviewQueueItem): string {
       pcg_stability: item.stability,
       pcg_inference_level: item.inferenceLevel,
       pcg_applies_to: item.appliesTo || [],
-      pcg_agent_instruction: item.agentInstruction
+      pcg_agent_instruction: item.agentInstruction,
+      pcg_review_priority: item.reviewPriority,
+      pcg_variant_labels: item.variantLabels || [],
+      pcg_variant_count: item.variantCount,
+      pcg_grouped_source_count: item.groupedSourceCount,
+      pcg_grouped_evidence_count: item.groupedEvidenceCount
     }),
     `# Review: ${item.label}`,
     "",

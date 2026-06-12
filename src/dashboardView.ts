@@ -303,6 +303,18 @@ export function renderReport(container: HTMLElement, report: GraphBuildReport): 
     text: `Review queue items: ${report.reviewQueueItemCount ?? 0}`
   });
   list.createEl("li", {
+    text: `Review groups rendered: ${report.reviewQueueGroupCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Review priority groups: high ${report.reviewQueueHighPriorityCount ?? 0}, medium ${report.reviewQueueMediumPriorityCount ?? 0}, low ${report.reviewQueueLowPriorityCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Review variants merged: ${report.reviewQueueMergedVariantCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Low-priority review candidates summarized: ${report.reviewQueueSummarizedCandidateCount ?? 0}`
+  });
+  list.createEl("li", {
     text: `Approved review items promoted: ${report.promotedReviewItemCount ?? 0}`
   });
   list.createEl("li", {

@@ -72,6 +72,7 @@ export const CONTEXT_NODE_PLURAL_LABEL: Record<ContextNodeType, string> = {
 export type SelfModelStability = "stable" | "recurring" | "situational" | "temporary";
 export type SelfModelInferenceLevel = "explicit" | "supported_inference";
 export type ReviewStatus = "pending" | "approved" | "rejected";
+export type ReviewPriority = "high" | "medium" | "low";
 
 export interface ConversationTurn {
   id: string;
@@ -199,6 +200,12 @@ export interface GraphBuildStats {
   underlinkedSources: number;
   anchorCandidatesRejected: number;
   reviewQueueItems: number;
+  reviewQueueGroups: number;
+  reviewQueueHighPriority: number;
+  reviewQueueMediumPriority: number;
+  reviewQueueLowPriority: number;
+  reviewQueueMergedVariants: number;
+  reviewQueueSummarizedCandidates: number;
   promotedReviewItems: number;
   suppressedReviewItems: number;
   canonicalSelfModelNodes: number;
@@ -243,6 +250,11 @@ export interface ReviewQueueItem {
   appliesTo?: string[];
   agentInstruction?: string;
   status: ReviewStatus;
+  reviewPriority?: ReviewPriority;
+  variantLabels?: string[];
+  variantCount?: number;
+  groupedSourceCount?: number;
+  groupedEvidenceCount?: number;
 }
 
 export interface ReviewQueueSeed extends ReviewQueueItem {
@@ -373,6 +385,7 @@ export interface CachedSelfModelEntry {
   transcriptHash: string;
   model: string;
   promptVersion: string;
+  cacheKeyVersion?: number;
   value: Partial<ExtractedContext>;
 }
 
@@ -426,6 +439,12 @@ export interface GraphBuildReport {
   underlinkedSourceCount: number;
   anchorCandidateRejectedCount: number;
   reviewQueueItemCount: number;
+  reviewQueueGroupCount: number;
+  reviewQueueHighPriorityCount: number;
+  reviewQueueMediumPriorityCount: number;
+  reviewQueueLowPriorityCount: number;
+  reviewQueueMergedVariantCount: number;
+  reviewQueueSummarizedCandidateCount: number;
   promotedReviewItemCount: number;
   suppressedReviewItemCount: number;
   canonicalSelfModelNodeCount: number;

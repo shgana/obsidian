@@ -1,6 +1,6 @@
 {
   "name": "personal-context-graph",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "An Obsidian plugin that imports ChatGPT exports into a typed personal context graph.",
   "main": "main.js",
   "scripts": {

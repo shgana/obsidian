@@ -7,6 +7,7 @@ import {
   type CanonicalNodeSeed,
   type ContextNodeType,
   type NodeEvidence,
+  type ReviewPriority,
   type ReviewQueueSeed,
   type ReviewStatus
 } from "./types";
@@ -198,7 +199,12 @@ function managedFileToReviewSeeds(
     inferenceLevel: asInferenceLevel(file.frontmatter.pcg_inference_level),
     appliesTo: asStringArray(file.frontmatter.pcg_applies_to),
     agentInstruction: asString(file.frontmatter.pcg_agent_instruction),
-    status
+    status,
+    reviewPriority: asReviewPriority(file.frontmatter.pcg_review_priority),
+    variantLabels: asStringArray(file.frontmatter.pcg_variant_labels),
+    variantCount: asNumber(file.frontmatter.pcg_variant_count, 1),
+    groupedSourceCount: asNumber(file.frontmatter.pcg_grouped_source_count, sourceIds.length),
+    groupedEvidenceCount: asNumber(file.frontmatter.pcg_grouped_evidence_count, evidence.length)
   }];
 }
 
@@ -249,7 +255,12 @@ function parseReviewQueueInboxBlock(
     inferenceLevel: asInferenceLevel(readReviewField(block, "Inference level")),
     appliesTo: splitReviewList(readReviewField(block, "Applies to")),
     agentInstruction: extractSubsection(block, "Agent Instruction") || "",
-    status
+    status,
+    reviewPriority: asReviewPriority(readReviewField(block, "Priority")),
+    variantLabels: splitReviewList(readReviewField(block, "Variant labels")),
+    variantCount: asNumber(parseScalar(readReviewField(block, "Variant count")), 1),
+    groupedSourceCount: asNumber(parseScalar(readReviewField(block, "Grouped sources")), sourceIds.length),
+    groupedEvidenceCount: asNumber(parseScalar(readReviewField(block, "Grouped evidence")), evidence.length)
   };
 }
 
@@ -449,6 +460,10 @@ function asNumber(value: unknown, fallback: number): number {
 
 function asReviewStatus(value: unknown): ReviewStatus | undefined {
   return value === "pending" || value === "approved" || value === "rejected" ? value : undefined;
+}
+
+function asReviewPriority(value: unknown): ReviewPriority | undefined {
+  return value === "high" || value === "medium" || value === "low" ? value : undefined;
 }
 
 function asStability(value: unknown): CanonicalNodeSeed["stability"] {
