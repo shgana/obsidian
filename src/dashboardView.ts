@@ -73,7 +73,8 @@ export class ContextGraphDashboardView extends ItemView {
 export function renderImportStatus(
   container: HTMLElement,
   state: ImportRunState | undefined,
-  checkpoint?: ImportCheckpoint
+  checkpoint?: ImportCheckpoint,
+  now: Date = new Date()
 ): void {
   container.createEl("h3", { text: "Import Status" });
 
@@ -106,19 +107,59 @@ export function renderImportStatus(
       text: `Progress: ${state.lastImportProgressMessage} (${state.lastImportProgressCompleted ?? "?"}/${state.lastImportProgressTotal ?? "?"})`
     });
   }
+  if (
+    state.lastImportProgressCompletedChunks !== undefined ||
+    state.lastImportProgressTotalChunks !== undefined
+  ) {
+    list.createEl("li", {
+      text: `Chunks: ${state.lastImportProgressCompletedChunks ?? "?"}/${state.lastImportProgressTotalChunks ?? "?"}`
+    });
+  }
   if (state.lastImportStartedAt) {
     list.createEl("li", {
-      text: `Started: ${state.lastImportStartedAt}`
+      text: `Started: ${formatTimestamp(state.lastImportStartedAt)}`
     });
   }
   if (state.lastImportUpdatedAt) {
     list.createEl("li", {
-      text: `Last updated: ${state.lastImportUpdatedAt}`
+      text: `Last updated: ${formatTimestamp(state.lastImportUpdatedAt)}`
     });
   }
   if (state.lastImportCompletedAt) {
     list.createEl("li", {
-      text: `Completed: ${state.lastImportCompletedAt}`
+      text: `Completed: ${formatTimestamp(state.lastImportCompletedAt)}`
+    });
+  }
+  const elapsed = elapsedImportMs(state, now);
+  if (elapsed !== undefined) {
+    list.createEl("li", {
+      text: `${state.lastImportStatus === "running" ? "Elapsed" : "Duration"}: ${formatDuration(elapsed)}`
+    });
+  }
+  const eta = state.lastImportStatus === "running" ? estimateRemainingMs(state, now) : undefined;
+  if (eta !== undefined) {
+    list.createEl("li", {
+      text: `ETA: ${formatDuration(eta)} remaining`
+    });
+  }
+  const conversationThroughput = throughputMs(
+    elapsed,
+    state.lastImportProgressCompleted,
+    state.lastImportProgressTotal
+  );
+  if (conversationThroughput !== undefined) {
+    list.createEl("li", {
+      text: `Avg per conversation: ${formatDuration(conversationThroughput)}`
+    });
+  }
+  const chunkThroughput = throughputMs(
+    elapsed,
+    state.lastImportProgressCompletedChunks,
+    state.lastImportProgressTotalChunks
+  );
+  if (chunkThroughput !== undefined) {
+    list.createEl("li", {
+      text: `Avg per extraction chunk: ${formatDuration(chunkThroughput)}`
     });
   }
   if (state.lastImportError) {
@@ -128,9 +169,11 @@ export function renderImportStatus(
   }
   if (state.lastImportErrorAt) {
     list.createEl("li", {
-      text: `Error recorded: ${state.lastImportErrorAt}`
+      text: `Error recorded: ${formatTimestamp(state.lastImportErrorAt)}`
     });
   }
+
+  renderPhaseTimings(container, state, now);
 
   if (isCheckpointStaleAfterAttempt(state, checkpoint)) {
     container.createEl("p", {
@@ -164,6 +207,35 @@ export function renderReport(container: HTMLElement, report: GraphBuildReport): 
   list.createEl("li", {
     text: `Processed conversations: ${report.processedConversationCount}`
   });
+  const reportDuration = report.durationMs ?? durationBetween(report.startedAt, report.completedAt);
+  if (reportDuration !== undefined) {
+    list.createEl("li", {
+      text: `Duration: ${formatDuration(reportDuration)}`
+    });
+  }
+  list.createEl("li", {
+    text: `Started: ${formatTimestamp(report.startedAt)}`
+  });
+  list.createEl("li", {
+    text: `Completed: ${formatTimestamp(report.completedAt)}`
+  });
+  const reportConversationThroughput = throughputMs(
+    reportDuration,
+    report.processedConversationCount,
+    report.processedConversationCount
+  );
+  if (reportConversationThroughput !== undefined) {
+    list.createEl("li", {
+      text: `Avg per conversation: ${formatDuration(reportConversationThroughput)}`
+    });
+  }
+  const extractionCalls = report.apiUsageByPhase?.context_extraction?.calls;
+  const reportChunkThroughput = throughputMs(reportDuration, extractionCalls, extractionCalls);
+  if (reportChunkThroughput !== undefined) {
+    list.createEl("li", {
+      text: `Avg per extraction chunk: ${formatDuration(reportChunkThroughput)}`
+    });
+  }
   list.createEl("li", {
     text: `Estimated API cost: $${report.estimatedCostUsd.toFixed(4)}`
   });
@@ -292,4 +364,140 @@ export function renderReport(container: HTMLElement, report: GraphBuildReport): 
       });
     }
   }
+}
+
+function renderPhaseTimings(
+  container: HTMLElement,
+  state: ImportRunState,
+  now: Date
+): void {
+  const timings = state.lastImportPhaseTimings || [];
+  if (timings.length === 0) {
+    return;
+  }
+
+  container.createEl("h3", { text: "Phase Timings" });
+  const list = container.createEl("ul");
+  for (const timing of timings) {
+    const isOpen = !timing.completedAt && state.lastImportStatus === "running";
+    const duration =
+      timing.durationMs ??
+      durationBetween(timing.startedAt, isOpen ? now.toISOString() : timing.completedAt);
+    const progress =
+      timing.progressTotal !== undefined
+        ? ` (${timing.progressCompleted ?? 0}/${timing.progressTotal}${
+            timing.progressTotalChunks !== undefined
+              ? `, chunks ${timing.progressCompletedChunks ?? 0}/${timing.progressTotalChunks}`
+              : ""
+          })`
+        : "";
+    list.createEl("li", {
+      text: `${formatPhase(timing.phase)}: ${duration !== undefined ? formatDuration(duration) : "in progress"}${progress}`
+    });
+  }
+}
+
+function elapsedImportMs(state: ImportRunState, now: Date): number | undefined {
+  if (!state.lastImportStartedAt) {
+    return undefined;
+  }
+
+  if (state.lastImportDurationMs !== undefined && state.lastImportStatus !== "running") {
+    return state.lastImportDurationMs;
+  }
+
+  const end =
+    state.lastImportStatus === "running"
+      ? now.toISOString()
+      : state.lastImportCompletedAt || state.lastImportErrorAt || state.lastImportUpdatedAt;
+  return durationBetween(state.lastImportStartedAt, end);
+}
+
+function estimateRemainingMs(state: ImportRunState, now: Date): number | undefined {
+  const elapsed = elapsedImportMs(state, now);
+  if (elapsed === undefined || elapsed <= 0) {
+    return undefined;
+  }
+
+  const chunkRemaining = remainingMsFromProgress(
+    elapsed,
+    state.lastImportProgressCompletedChunks,
+    state.lastImportProgressTotalChunks
+  );
+  if (chunkRemaining !== undefined) {
+    return chunkRemaining;
+  }
+
+  return remainingMsFromProgress(
+    elapsed,
+    state.lastImportProgressCompleted,
+    state.lastImportProgressTotal
+  );
+}
+
+function remainingMsFromProgress(
+  elapsed: number,
+  completed?: number,
+  total?: number
+): number | undefined {
+  if (!completed || !total || completed <= 0 || total <= completed) {
+    return undefined;
+  }
+
+  return Math.round((elapsed / completed) * (total - completed));
+}
+
+function throughputMs(
+  elapsed: number | undefined,
+  completed?: number,
+  total?: number
+): number | undefined {
+  void total;
+  if (elapsed === undefined || !completed || completed <= 0) {
+    return undefined;
+  }
+
+  return Math.round(elapsed / completed);
+}
+
+function durationBetween(startedAt?: string, completedAt?: string): number | undefined {
+  if (!startedAt || !completedAt) {
+    return undefined;
+  }
+
+  const duration = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  }
+
+  return `${seconds}s`;
+}
+
+function formatTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function formatPhase(phase: NonNullable<ImportRunState["lastImportPhase"]>): string {
+  return phase
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }

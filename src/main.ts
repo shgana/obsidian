@@ -20,6 +20,7 @@ import {
   migrateImportCacheState
 } from "./importCache";
 import {
+  applyImportRunStatePatch,
   markInterruptedImportRunState,
   migrateImportRunState,
   sanitizeImportErrorMessage
@@ -132,6 +133,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
     await this.updateImportRunState({
       lastImportStartedAt: new Date().toISOString(),
       lastImportCompletedAt: undefined,
+      lastImportDurationMs: undefined,
+      lastImportPhaseStartedAt: undefined,
       lastImportPhase: "parsing_zip",
       lastImportStatus: "running",
       lastImportError: undefined,
@@ -141,7 +144,10 @@ export default class PersonalContextGraphPlugin extends Plugin {
       lastImportTotalConversations: undefined,
       lastImportProgressMessage: undefined,
       lastImportProgressCompleted: undefined,
-      lastImportProgressTotal: undefined
+      lastImportProgressTotal: undefined,
+      lastImportProgressCompletedChunks: undefined,
+      lastImportProgressTotalChunks: undefined,
+      lastImportPhaseTimings: []
     });
 
     try {
@@ -163,7 +169,9 @@ export default class PersonalContextGraphPlugin extends Plugin {
         lastImportTotalConversations: preview.totalConversations,
         lastImportProgressMessage: "Preview ready. Waiting for import confirmation.",
         lastImportProgressCompleted: 0,
-        lastImportProgressTotal: preview.selectedConversations
+        lastImportProgressTotal: preview.selectedConversations,
+        lastImportProgressCompletedChunks: 0,
+        lastImportProgressTotalChunks: undefined
       });
       new ImportConsentModal(
         this.app,
@@ -196,7 +204,9 @@ export default class PersonalContextGraphPlugin extends Plugin {
         lastImportTotalConversations: preview?.totalConversations ?? conversations.length,
         lastImportProgressMessage: "Import confirmed. Starting extraction.",
         lastImportProgressCompleted: 0,
-        lastImportProgressTotal: preview?.selectedConversations ?? conversations.length
+        lastImportProgressTotal: preview?.selectedConversations ?? conversations.length,
+        lastImportProgressCompletedChunks: 0,
+        lastImportProgressTotalChunks: undefined
       });
       const openAiProvider = new OpenAIProvider(this.settings);
       const cachedProvider = this.settings.enableImportCache
@@ -219,14 +229,18 @@ export default class PersonalContextGraphPlugin extends Plugin {
             this.importRunState.lastImportPhase !== phase ||
             this.importRunState.lastImportProgressMessage !== status.message ||
             this.importRunState.lastImportProgressCompleted !== status.completed ||
-            this.importRunState.lastImportProgressTotal !== status.total
+            this.importRunState.lastImportProgressTotal !== status.total ||
+            this.importRunState.lastImportProgressCompletedChunks !== status.completedChunks ||
+            this.importRunState.lastImportProgressTotalChunks !== status.totalChunks
           ) {
             void this.updateImportRunState({
               lastImportPhase: phase,
               lastImportStatus: "running",
               lastImportProgressMessage: status.message,
               lastImportProgressCompleted: status.completed,
-              lastImportProgressTotal: status.total
+              lastImportProgressTotal: status.total,
+              lastImportProgressCompletedChunks: status.completedChunks,
+              lastImportProgressTotalChunks: status.totalChunks
             });
           }
           progress.update(`${status.message} (${status.completed}/${status.total})`);
@@ -313,11 +327,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
   }
 
   private async updateImportRunState(patch: Partial<ImportRunState>): Promise<void> {
-    this.importRunState = {
-      ...this.importRunState,
-      ...patch,
-      lastImportUpdatedAt: new Date().toISOString()
-    };
+    const updatedAt = new Date().toISOString();
+    this.importRunState = applyImportRunStatePatch(this.importRunState, patch, updatedAt);
     await this.savePluginData();
     this.refreshDashboard();
   }
@@ -344,10 +355,8 @@ export default class PersonalContextGraphPlugin extends Plugin {
 
   private markImportSucceeded(report: GraphBuildReport): void {
     const completedAt = report.completedAt || new Date().toISOString();
-    this.importRunState = {
-      ...this.importRunState,
+    this.importRunState = applyImportRunStatePatch(this.importRunState, {
       lastImportCompletedAt: completedAt,
-      lastImportUpdatedAt: completedAt,
       lastImportPhase: "completed",
       lastImportStatus: "succeeded",
       lastImportError: undefined,
@@ -357,7 +366,7 @@ export default class PersonalContextGraphPlugin extends Plugin {
       lastImportProgressMessage: "Import completed.",
       lastImportProgressCompleted: report.processedConversationCount,
       lastImportProgressTotal: report.processedConversationCount
-    };
+    }, completedAt);
   }
 
   private async openVaultFile(path: string): Promise<void> {

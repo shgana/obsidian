@@ -287,6 +287,8 @@ export interface ImportRunState {
   lastImportStartedAt?: string;
   lastImportUpdatedAt?: string;
   lastImportCompletedAt?: string;
+  lastImportDurationMs?: number;
+  lastImportPhaseStartedAt?: string;
   lastImportPhase?: ImportRunPhase;
   lastImportStatus?: ImportRunStatus;
   lastImportError?: string;
@@ -297,6 +299,20 @@ export interface ImportRunState {
   lastImportProgressMessage?: string;
   lastImportProgressCompleted?: number;
   lastImportProgressTotal?: number;
+  lastImportProgressCompletedChunks?: number;
+  lastImportProgressTotalChunks?: number;
+  lastImportPhaseTimings?: ImportRunPhaseTiming[];
+}
+
+export interface ImportRunPhaseTiming {
+  phase: ImportRunPhase;
+  startedAt: string;
+  completedAt?: string;
+  durationMs?: number;
+  progressCompleted?: number;
+  progressTotal?: number;
+  progressCompletedChunks?: number;
+  progressTotalChunks?: number;
 }
 
 export type ApiUsagePhase =
@@ -420,6 +436,7 @@ export interface GraphBuildReport {
   agentContextPath: string;
   startedAt: string;
   completedAt: string;
+  durationMs?: number;
   estimatedTokens: number;
   estimatedExtractionInputTokens: number;
   estimatedExtractionOutputTokens: number;

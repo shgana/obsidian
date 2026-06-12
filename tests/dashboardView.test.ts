@@ -38,9 +38,62 @@ describe("dashboard import status", () => {
     expect(text).toContain("File: export.zip");
     expect(text).toContain("Conversations: 20 selected of 300");
     expect(text).toContain("Progress: Extracting context from Posture Scoring Method (0/20)");
-    expect(text).toContain("Last updated: 2026-06-04T12:01:00.000Z");
+    expect(text).toContain("Last updated:");
+    expect(text).toContain("Duration: 1m 00s");
     expect(text).toContain("Last error: OpenAI request failed");
     expect(text).toContain("latest import attempt is newer than the saved checkpoint");
+  });
+
+  it("shows live elapsed time, chunk progress, throughput, and ETA for running imports", () => {
+    const container = new MockElement("div");
+    const state: ImportRunState = {
+      lastImportStartedAt: "2026-06-04T12:00:00.000Z",
+      lastImportUpdatedAt: "2026-06-04T12:02:00.000Z",
+      lastImportPhaseStartedAt: "2026-06-04T12:01:00.000Z",
+      lastImportPhase: "extracting",
+      lastImportStatus: "running",
+      lastImportFileName: "export.zip",
+      lastImportSelectedConversations: 50,
+      lastImportTotalConversations: 355,
+      lastImportProgressMessage: "Extracting context from AI Accuracy Improvement",
+      lastImportProgressCompleted: 2,
+      lastImportProgressTotal: 50,
+      lastImportProgressCompletedChunks: 5,
+      lastImportProgressTotalChunks: 100,
+      lastImportPhaseTimings: [
+        {
+          phase: "parsing_zip",
+          startedAt: "2026-06-04T12:00:00.000Z",
+          completedAt: "2026-06-04T12:01:00.000Z",
+          durationMs: 60000
+        },
+        {
+          phase: "extracting",
+          startedAt: "2026-06-04T12:01:00.000Z",
+          progressCompleted: 2,
+          progressTotal: 50,
+          progressCompletedChunks: 5,
+          progressTotalChunks: 100
+        }
+      ]
+    };
+
+    renderImportStatus(
+      container as never,
+      state,
+      checkpoint("2026-06-04T11:00:00.000Z"),
+      new Date("2026-06-04T12:10:00.000Z")
+    );
+
+    const text = allText(container);
+    expect(text).toContain("Elapsed: 10m 00s");
+    expect(text).toContain("Chunks: 5/100");
+    expect(text).toContain("ETA: 3h 10m 00s remaining");
+    expect(text).toContain("Avg per conversation: 5m 00s");
+    expect(text).toContain("Avg per extraction chunk: 2m 00s");
+    expect(text).toContain("Phase Timings");
+    expect(text).toContain("Parsing Zip: 1m 00s");
+    expect(text).toContain("Extracting: 9m 00s (2/50, chunks 5/100)");
   });
 
   it("shows succeeded metadata without stale warning", () => {
@@ -49,6 +102,7 @@ describe("dashboard import status", () => {
     renderImportStatus(container as never, {
       lastImportStartedAt: "2026-06-04T12:00:00.000Z",
       lastImportCompletedAt: "2026-06-04T12:03:00.000Z",
+      lastImportDurationMs: 180000,
       lastImportPhase: "completed",
       lastImportStatus: "succeeded",
       lastImportSelectedConversations: 20,
@@ -57,7 +111,8 @@ describe("dashboard import status", () => {
 
     const text = allText(container);
     expect(text).toContain("Status: succeeded");
-    expect(text).toContain("Completed: 2026-06-04T12:03:00.000Z");
+    expect(text).toContain("Completed:");
+    expect(text).toContain("Duration: 3m 00s");
     expect(text).not.toContain("latest import attempt is newer than the saved checkpoint");
   });
 });
@@ -73,6 +128,7 @@ describe("dashboard import report", () => {
     report.actualOutputTokens = 200;
     report.actualEmbeddingTokens = 300;
     report.actualTotalTokens = 1500;
+    report.durationMs = 180000;
     report.cacheHitCount = 40;
     report.cacheMissCount = 5;
     report.apiUsageByPhase = {
@@ -92,6 +148,9 @@ describe("dashboard import report", () => {
 
     const text = allText(container);
     expect(text).toContain("Estimated API cost: $1.5000");
+    expect(text).toContain("Duration: 3m 00s");
+    expect(text).toContain("Avg per conversation: 9s");
+    expect(text).toContain("Avg per extraction chunk: 1m 30s");
     expect(text).toContain("Actual estimated API cost: $0.1200");
     expect(text).toContain("Actual tokens: 1500 total");
     expect(text).toContain("Cache: 40 hits, 5 misses");

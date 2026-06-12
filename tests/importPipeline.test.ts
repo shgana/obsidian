@@ -166,6 +166,46 @@ describe("import pipeline", () => {
     expect(artifacts.report.canonicalSelfModelNodeCount).toBe(1);
   });
 
+  it("reports chunk-aware extraction progress for long conversations", async () => {
+    const progressEvents: Array<{
+      completed: number;
+      total: number;
+      completedChunks?: number;
+      totalChunks?: number;
+      message: string;
+    }> = [];
+    const longConversation: ParsedConversation = {
+      source: "chatgpt",
+      sourceId: "conv-long",
+      title: "Long import",
+      turns: Array.from({ length: 4 }, (_, index) => ({
+        id: `turn-${index}`,
+        role: "user" as const,
+        text: `Build this as an Obsidian plugin ${index}. ${"x".repeat(90)}`
+      })),
+      rawMessageCount: 4
+    };
+
+    await runImport(
+      [longConversation],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph",
+        minimumCanonicalSources: 1,
+        maxPromptChars: 180
+      },
+      mockProvider,
+      (progress) => progressEvents.push(progress)
+    );
+
+    const lastProgress = progressEvents[progressEvents.length - 1];
+    expect(progressEvents.some((event) => (event.totalChunks || 0) > 1)).toBe(true);
+    expect(progressEvents.some((event) => event.message.includes("chunk 1/"))).toBe(true);
+    expect(lastProgress.completedChunks).toBe(lastProgress.totalChunks);
+  });
+
   it("renders source notes, typed nodes, and a single default agent context", async () => {
     const settings = {
       ...DEFAULT_SETTINGS,

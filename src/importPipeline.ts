@@ -30,6 +30,8 @@ export interface ImportProgress {
   message: string;
   completed: number;
   total: number;
+  completedChunks?: number;
+  totalChunks?: number;
 }
 
 export interface ImportArtifacts {
@@ -110,6 +112,11 @@ export async function runImport(
   const startedAt = nowIso();
   const selectedConversations = selectConversations(conversations, settings);
   const preview = createImportPreview("selected conversations", conversations, settings);
+  const chunkCounts = selectedConversations.map((conversation) =>
+    splitConversation(conversation, settings.maxPromptChars).length
+  );
+  const totalChunks = chunkCounts.reduce((sum, count) => sum + count, 0);
+  let completedChunks = 0;
 
   if (settings.costCapUsd > 0 && preview.estimatedCostUsd > settings.costCapUsd) {
     throw new Error(
@@ -122,15 +129,46 @@ export async function runImport(
   const inputs: ConversationExtraction[] = [];
   for (let index = 0; index < selectedConversations.length; index += 1) {
     const conversation = selectedConversations[index];
+    const conversationChunkCount = chunkCounts[index] || 1;
     progress?.({
       phase: "extracting",
       message: `Extracting context from ${conversation.title}`,
       completed: index,
-      total: selectedConversations.length
+      total: selectedConversations.length,
+      completedChunks,
+      totalChunks
     });
 
-    const extraction = await extractConversation(conversation, settings, provider);
+    let completedConversationChunks = 0;
+    const extraction = await extractConversation(
+      conversation,
+      settings,
+      provider,
+      (completedForConversation, totalForConversation) => {
+        completedConversationChunks = completedForConversation;
+        progress?.({
+          phase: "extracting",
+          message:
+            totalForConversation > 1
+              ? `Extracting context from ${conversation.title} (chunk ${completedForConversation}/${totalForConversation})`
+              : `Extracting context from ${conversation.title}`,
+          completed: index,
+          total: selectedConversations.length,
+          completedChunks: completedChunks + completedForConversation,
+          totalChunks
+        });
+      }
+    );
     inputs.push({ conversation, extraction });
+    completedChunks += Math.max(completedConversationChunks, conversationChunkCount);
+    progress?.({
+      phase: "extracting",
+      message: `Extracted context from ${conversation.title}`,
+      completed: index + 1,
+      total: selectedConversations.length,
+      completedChunks,
+      totalChunks
+    });
     await options.onCacheUpdated?.();
   }
 
@@ -138,7 +176,9 @@ export async function runImport(
     phase: "building-graph",
     message: "Building canonical context graph",
     completed: selectedConversations.length,
-    total: selectedConversations.length
+    total: selectedConversations.length,
+    completedChunks,
+    totalChunks
   });
   const graph = await buildContextGraph(inputs, settings, provider, canonicalState);
   await options.onCacheUpdated?.();
@@ -147,7 +187,9 @@ export async function runImport(
     phase: "rendering",
     message: "Rendering Markdown graph files",
     completed: selectedConversations.length,
-    total: selectedConversations.length
+    total: selectedConversations.length,
+    completedChunks,
+    totalChunks
   });
   const agentContextProfileSummary = await synthesizeAgentContextProfile(
     inputs,
@@ -255,16 +297,21 @@ function selectConversations(
 async function extractConversation(
   conversation: ParsedConversation,
   settings: PersonalContextGraphSettings,
-  provider: AIProvider
+  provider: AIProvider,
+  onChunkExtracted?: (completedChunks: number, totalChunks: number) => void
 ): Promise<ExtractedContext> {
   const chunks = splitConversation(conversation, settings.maxPromptChars);
   if (chunks.length === 1) {
-    return extractConversationChunk(conversation, settings, provider);
+    const extraction = await extractConversationChunk(conversation, settings, provider);
+    onChunkExtracted?.(1, 1);
+    return extraction;
   }
 
   const extractions: ExtractedContext[] = [];
-  for (const chunk of chunks) {
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
     extractions.push(await extractConversationChunk(chunk, settings, provider));
+    onChunkExtracted?.(index + 1, chunks.length);
   }
 
   return mergeChunkExtractions(conversation, extractions);
@@ -469,6 +516,7 @@ function createBaseReport(args: {
     agentContextPath: buildPrimaryAgentContextPath(args.settings),
     startedAt: args.startedAt,
     completedAt: args.completedAt,
+    durationMs: elapsedMs(args.startedAt, args.completedAt),
     estimatedTokens: args.preview.estimatedTokens,
     estimatedExtractionInputTokens: args.preview.estimatedExtractionInputTokens,
     estimatedExtractionOutputTokens: args.preview.estimatedExtractionOutputTokens,
@@ -681,4 +729,9 @@ function average(values: number[]): number {
   }
 
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function elapsedMs(startedAt: string, completedAt: string): number | undefined {
+  const duration = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
 }
