@@ -10,6 +10,8 @@ import {
   type FileDraft,
   type GraphNode,
   type NodeEvidence,
+  type ParsedConversation,
+  type ReviewCategory,
   type ReviewQueueItem
 } from "./types";
 import { conversationToTranscript } from "./conversationText";
@@ -28,6 +30,33 @@ const AGENT_CONTEXT_NODE_ORDER: ContextNodeType[] = [
   "entity",
   "artifact"
 ];
+
+const REVIEW_CATEGORY_LABEL: Record<ReviewCategory, string> = {
+  communication_style: "Communication Style",
+  technical_workflow: "Technical Workflow",
+  product_strategy: "Product Strategy",
+  scann_logic: "Scann Logic",
+  ailingo_ux: "AiLingo UX",
+  writing_resume_pitch: "Writing, Resume, Pitch",
+  visual_design: "Visual Design",
+  lookup_behavior: "Lookup Behavior",
+  other: "Other"
+};
+const REVIEW_CATEGORY_ORDER: ReviewCategory[] = [
+  "communication_style",
+  "technical_workflow",
+  "product_strategy",
+  "scann_logic",
+  "ailingo_ux",
+  "writing_resume_pitch",
+  "visual_design",
+  "lookup_behavior",
+  "other"
+];
+const REVIEW_RENDER_CAPS = {
+  high: 5,
+  medium: 3
+};
 
 export function createGraphFileDrafts(
   inputs: ConversationExtraction[],
@@ -175,6 +204,7 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
       pcg_id: `source_${hashString(input.conversation.sourceId)}`,
       pcg_source: "chatgpt",
       pcg_source_id: input.conversation.sourceId,
+      pcg_source_class: graph.sourceClassesById[input.conversation.sourceId],
       pcg_managed: true,
       pcg_confidence: round(input.extraction.confidence),
       pcg_last_seen: input.conversation.updateTime || input.conversation.createTime,
@@ -184,7 +214,7 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
     `# ${input.conversation.title}`,
     "",
     "## Summary",
-    input.extraction.summary || "No summary extracted.",
+    sanitizeRenderedMarkdownText(input.extraction.summary || "No summary extracted."),
     "",
     "## Context Links",
     renderTypedLinks(linksByType),
@@ -196,8 +226,60 @@ function renderSourceNote(input: ConversationExtraction, graph: BuiltContextGrap
     renderSourceEvidence(input, graph),
     "",
     "## Transcript",
-    conversationToTranscript(input.conversation)
+    sanitizedConversationTranscript(input.conversation)
   ].join("\n");
+}
+
+function sanitizedConversationTranscript(conversation: ParsedConversation): string {
+  return conversation.turns
+    .map((turn) => {
+      const timestamp = turn.createTime ? ` ${turn.createTime}` : "";
+      const author = turn.authorName ? `/${sanitizeRenderedMarkdownText(turn.authorName)}` : "";
+      return `### ${turn.role}${author}${timestamp}\n${sanitizeRenderedMarkdownText(turn.text)}`;
+    })
+    .join("\n\n");
+}
+
+function sanitizeRenderedMarkdownText(value: string): string {
+  let sanitized = value;
+  sanitized = sanitized.replace(/\[\[[\s\S]*?(?:turn\d+product|product_entity|turnProduct)[\s\S]*?\]\]/gi, (match) => {
+    const labels = productLabelsFromWidget(match);
+    return labels.length > 0 ? labels.join("; ") : "[product list omitted]";
+  });
+  sanitized = sanitized.replace(/"product_entity"\s*:\s*"[^"]*"/gi, "");
+  sanitized = sanitized.replace(/\bturn\d+product\w*\b/gi, "");
+  sanitized = sanitized.replace(/\bturnProduct\w*\b/gi, "");
+  sanitized = sanitized.replace(/!\[[^\]]*\]\([^)]*\)/g, "");
+  sanitized = sanitized.replace(/\[[0-9]+(?::[0-9]+)?\]/g, "");
+  sanitized = sanitized.replace(/\[\[/g, "[\\[");
+  sanitized = sanitized.replace(/\]\]/g, "\\]]");
+  sanitized = sanitized.replace(/[ \t]{2,}/g, " ");
+  sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
+  return sanitized.trim();
+}
+
+function productLabelsFromWidget(widget: string): string[] {
+  const labels = new Set<string>();
+  const labelPatterns = [
+    /"title"\s*:\s*"([^"]+)"/gi,
+    /"name"\s*:\s*"([^"]+)"/gi,
+    /"label"\s*:\s*"([^"]+)"/gi
+  ];
+
+  for (const pattern of labelPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(widget)) !== null) {
+      const label = match[1]
+        .replace(/\\u[\dA-Fa-f]{4}/g, "")
+        .replace(/\\"/g, "\"")
+        .trim();
+      if (label && !/^turn\d+product/i.test(label) && label !== "product_entity") {
+        labels.add(label);
+      }
+    }
+  }
+
+  return [...labels].slice(0, 8);
 }
 
 function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
@@ -226,7 +308,7 @@ function renderNodeNote(node: GraphNode, graph: BuiltContextGraph): string {
     `# ${CONTEXT_NODE_LABEL[node.type]}: ${node.label}`,
     "",
     "## Summary",
-    node.summary,
+    sanitizeRenderedMarkdownText(node.summary),
     "",
     ...renderSelfModelNodeSections(node),
     "",
@@ -252,7 +334,7 @@ function renderSelfModelNodeSections(
   const lines: string[] = [];
   if (node.agentInstruction) {
     lines.push("## Agent Instruction");
-    lines.push(node.agentInstruction);
+    lines.push(sanitizeRenderedMarkdownText(node.agentInstruction));
     lines.push("");
   }
 
@@ -288,7 +370,13 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
     }
     return left.label.localeCompare(right.label);
   });
-  const actionableItems = sortedItems.filter((item) => item.reviewPriority !== "low");
+  const categoryGroups = groupReviewItemsByCategory(sortedItems);
+  const renderedItems = categoryGroups.flatMap(([, groupedItems]) =>
+    renderedReviewItemsForCategory(groupedItems)
+  );
+  const summarizedItems = categoryGroups.flatMap(([, groupedItems]) =>
+    summarizedReviewItemsForCategory(groupedItems)
+  );
   const lowPriorityItems = sortedItems.filter((item) => item.reviewPriority === "low");
 
   const lines = [
@@ -297,9 +385,10 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
       pcg_id: "review_queue",
       pcg_source: "personal-context-graph",
       pcg_managed: true,
-      pcg_review_format: "inbox_v1",
+      pcg_review_format: "inbox_v2",
       pcg_review_item_count: sortedItems.length,
-      pcg_review_group_count: actionableItems.length,
+      pcg_review_group_count: renderedItems.length,
+      pcg_review_summarized_group_count: summarizedItems.length,
       pcg_review_low_priority_count: lowPriorityItems.length
     }),
     "# Review Queue",
@@ -313,33 +402,25 @@ function renderReviewQueueInbox(items: ReviewQueueItem[]): string {
     return lines.join("\n");
   }
 
-  for (const status of ["pending", "rejected"] as const) {
-    const statusItems = actionableItems.filter((item) => item.status === status);
-    if (statusItems.length === 0) {
+  for (const [category, categoryItems] of categoryGroups) {
+    const renderedForCategory = renderedReviewItemsForCategory(categoryItems);
+    const summarizedForCategory = summarizedReviewItemsForCategory(categoryItems);
+    if (renderedForCategory.length === 0 && summarizedForCategory.length === 0) {
       continue;
     }
 
-    lines.push(`## ${capitalize(status)}`);
+    lines.push(`## ${REVIEW_CATEGORY_LABEL[category]}`);
     lines.push("");
-    for (const item of statusItems) {
+    for (const item of renderedForCategory) {
       lines.push(...renderReviewQueueInboxItem(item));
       lines.push("");
     }
-  }
 
-  if (lowPriorityItems.length > 0) {
-    lines.push("## Low Priority Summary");
-    lines.push("");
-    lines.push(
-      `${lowPriorityItems.reduce((sum, item) => sum + (item.variantCount || 1), 0)} situational or low-confidence candidates were summarized instead of rendered as review chores.`
-    );
-    lines.push("");
-    for (const [type, typeItems] of groupReviewItemsByType(lowPriorityItems)) {
-      const examples = typeItems
-        .slice(0, 5)
-        .map((item) => item.label)
-        .join("; ");
-      lines.push(`- **${CONTEXT_NODE_LABEL[type]}**: ${typeItems.length} groups${examples ? `, e.g. ${examples}` : ""}.`);
+    if (summarizedForCategory.length > 0) {
+      lines.push("### Overflow Summary");
+      lines.push("");
+      lines.push(renderReviewOverflowSummary(summarizedForCategory));
+      lines.push("");
     }
   }
 
@@ -352,6 +433,7 @@ function renderReviewQueueInboxItem(item: ReviewQueueItem): string[] {
     `- **ID**: \`${item.id}\``,
     `- **Status**: \`${item.status}\``,
     item.reviewPriority ? `- **Priority**: \`${item.reviewPriority}\`` : undefined,
+    item.reviewCategory ? `- **Category**: \`${item.reviewCategory}\`` : undefined,
     `- **Target type**: \`${item.type}\``,
     `- **Confidence**: ${round(item.confidence)}`,
     item.variantCount && item.variantCount > 1 ? `- **Variant count**: ${item.variantCount}` : undefined,
@@ -370,14 +452,72 @@ function renderReviewQueueInboxItem(item: ReviewQueueItem): string[] {
     item.sourceIds.length > 0 ? `- **Source IDs**: ${item.sourceIds.join("; ")}` : undefined,
     "",
     "#### Summary",
-    item.summary,
+    sanitizeRenderedMarkdownText(item.summary),
     "",
     item.agentInstruction ? "#### Agent Instruction" : undefined,
-    item.agentInstruction || undefined,
+    item.agentInstruction ? sanitizeRenderedMarkdownText(item.agentInstruction) : undefined,
     item.agentInstruction ? "" : undefined,
     "#### Evidence",
     renderEvidenceList(item.evidence)
   ].filter((line): line is string => line !== undefined);
+}
+
+function groupReviewItemsByCategory(items: ReviewQueueItem[]): Array<[ReviewCategory, ReviewQueueItem[]]> {
+  const groups = new Map<ReviewCategory, ReviewQueueItem[]>();
+  for (const item of items) {
+    const category = item.reviewCategory || "other";
+    const group = groups.get(category) || [];
+    group.push(item);
+    groups.set(category, group);
+  }
+
+  return REVIEW_CATEGORY_ORDER
+    .map((category): [ReviewCategory, ReviewQueueItem[]] => [category, groups.get(category) || []])
+    .filter(([, categoryItems]) => categoryItems.length > 0);
+}
+
+function renderedReviewItemsForCategory(items: ReviewQueueItem[]): ReviewQueueItem[] {
+  const high = items.filter((item) => item.reviewPriority === "high").slice(0, REVIEW_RENDER_CAPS.high);
+  const medium = items.filter((item) => item.reviewPriority === "medium").slice(0, REVIEW_RENDER_CAPS.medium);
+  return [...high, ...medium].sort((left, right) => {
+    const statusDelta = reviewStatusRank(left.status) - reviewStatusRank(right.status);
+    if (statusDelta !== 0) {
+      return statusDelta;
+    }
+    const priorityDelta = reviewPriorityRank(left.reviewPriority) - reviewPriorityRank(right.reviewPriority);
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+    return left.label.localeCompare(right.label);
+  });
+}
+
+function summarizedReviewItemsForCategory(items: ReviewQueueItem[]): ReviewQueueItem[] {
+  const high = items.filter((item) => item.reviewPriority === "high");
+  const medium = items.filter((item) => item.reviewPriority === "medium");
+  const low = items.filter((item) => item.reviewPriority === "low");
+  return [
+    ...high.slice(REVIEW_RENDER_CAPS.high),
+    ...medium.slice(REVIEW_RENDER_CAPS.medium),
+    ...low
+  ];
+}
+
+function renderReviewOverflowSummary(items: ReviewQueueItem[]): string {
+  const highCount = items.filter((item) => item.reviewPriority === "high").length;
+  const mediumCount = items.filter((item) => item.reviewPriority === "medium").length;
+  const lowCount = items.filter((item) => item.reviewPriority === "low").length;
+  const variantCount = items.reduce((sum, item) => sum + (item.variantCount || 1), 0);
+  const examples = items
+    .slice(0, 6)
+    .map((item) => sanitizeRenderedMarkdownText(item.label))
+    .join("; ");
+
+  return [
+    `- **Hidden groups**: ${items.length} (${highCount} high, ${mediumCount} medium, ${lowCount} low).`,
+    `- **Hidden variants**: ${variantCount}.`,
+    examples ? `- **Examples**: ${examples}.` : undefined
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 function reviewStatusRank(status: ReviewQueueItem["status"]): number {
@@ -432,6 +572,7 @@ function renderReviewQueueNote(item: ReviewQueueItem): string {
       pcg_applies_to: item.appliesTo || [],
       pcg_agent_instruction: item.agentInstruction,
       pcg_review_priority: item.reviewPriority,
+      pcg_review_category: item.reviewCategory,
       pcg_variant_labels: item.variantLabels || [],
       pcg_variant_count: item.variantCount,
       pcg_grouped_source_count: item.groupedSourceCount,
@@ -445,7 +586,7 @@ function renderReviewQueueNote(item: ReviewQueueItem): string {
     "- **How to review**: Change `pcg_review_status` in frontmatter to `approved` or `rejected`.",
     "",
     "## Summary",
-    item.summary,
+    sanitizeRenderedMarkdownText(item.summary),
     "",
     ...renderSelfModelNodeSections(item),
     "",
@@ -723,11 +864,11 @@ function renderAgentContextSection(
     const dateMarker = formatDateMarker(node.lastSeen);
     lines.push(`### ${formatReference(node.path, node.label, settings.linkAgentContextToGraph)}${dateMarker}`);
     if (node.summary) {
-      lines.push(node.summary);
+      lines.push(sanitizeRenderedMarkdownText(node.summary));
     }
     if (node.agentInstruction) {
       lines.push("");
-      lines.push(`**Agent instruction:** ${node.agentInstruction}`);
+      lines.push(`**Agent instruction:** ${sanitizeRenderedMarkdownText(node.agentInstruction)}`);
     }
     if (node.appliesTo && node.appliesTo.length > 0) {
       lines.push("");
@@ -825,12 +966,12 @@ function renderTopNodes(nodes: GraphNode[], useWikiLinks: boolean): string {
   return topNodes
     .map((node) => {
       const evidencePreview = node.evidence[0]
-        ? ` Evidence: "${truncate(node.evidence[0].quote, 160)}"`
+        ? ` Evidence: "${truncate(sanitizeRenderedMarkdownText(node.evidence[0].quote), 160)}"`
         : "";
       const label = useWikiLinks ? wikiLink(node.path, node.label) : `${node.label} (${node.path})`;
       return `- ${label} (${round(node.confidence)}, ${
         node.evidence.length
-      } evidence item${node.evidence.length === 1 ? "" : "s"}): ${node.summary}${evidencePreview}`;
+      } evidence item${node.evidence.length === 1 ? "" : "s"}): ${sanitizeRenderedMarkdownText(node.summary)}${evidencePreview}`;
     })
     .join("\n");
 }
@@ -870,7 +1011,9 @@ function renderSourceEvidence(input: ConversationExtraction, graph: BuiltContext
       );
       lines.push(
         `- ${wikiLink(node.path, node.label)} (${round(node.confidence)}): ${
-          evidence ? truncate(evidence.quote, 220) : node.summary
+          evidence
+            ? truncate(sanitizeRenderedMarkdownText(evidence.quote), 220)
+            : sanitizeRenderedMarkdownText(node.summary)
         }`
       );
     }
@@ -924,8 +1067,8 @@ function renderSourceOnlyContext(
     for (const item of sourceOnlyItems) {
       const evidence = item.evidence[0]?.quote;
       lines.push(
-        `- ${item.label} (${round(item.confidence)}): ${item.summary}${
-          evidence ? ` Evidence: "${truncate(evidence, 180)}"` : ""
+        `- ${sanitizeRenderedMarkdownText(item.label)} (${round(item.confidence)}): ${sanitizeRenderedMarkdownText(item.summary)}${
+          evidence ? ` Evidence: "${truncate(sanitizeRenderedMarkdownText(evidence), 180)}"` : ""
         }`
       );
     }
@@ -943,8 +1086,8 @@ function renderEvidenceList(evidence: NodeEvidence[]): string {
   return evidence
     .map(
       (entry) =>
-        `- ${entry.sourceTitle} (${entry.sourcePath}) (${round(entry.confidence)}): "${truncate(
-          entry.quote,
+        `- ${sanitizeRenderedMarkdownText(entry.sourceTitle)} (${entry.sourcePath}) (${round(entry.confidence)}): "${truncate(
+          sanitizeRenderedMarkdownText(entry.quote),
           240
         )}"`
     )

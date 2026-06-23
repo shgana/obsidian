@@ -415,6 +415,64 @@ describe("context graph builder", () => {
     expect(github!.sourceIds.sort()).toEqual(["conv-durable", "conv-trx"]);
   });
 
+  it("keeps shopping product lookup sources source-only by default", async () => {
+    const input = extractionInput(
+      "conv-shopping",
+      "Harry's razors Walmart options",
+      "Harry's razors",
+      0.99
+    );
+    input.extraction.entities = [
+      graphItem("Harry's", "A shaving product brand in a shopping lookup.", 0.98),
+      graphItem("Walmart", "A retailer mentioned in a product lookup.", 0.98)
+    ];
+
+    const graph = await buildContextGraph(
+      [input],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
+
+    expect(graph.nodes).toHaveLength(0);
+    expect(graph.sourceClassesById["conv-shopping"]).toBe("shopping_product_lookup");
+    expect(graph.stats.transactionalSourceSuppressions).toBeGreaterThan(0);
+  });
+
+  it("lets source-only transactional lookups link to an existing durable canonical node", async () => {
+    const durableInput = extractionInput(
+      "conv-scann",
+      "Scann backend implementation",
+      "Firestore",
+      0.98
+    );
+    durableInput.extraction.entities = [
+      graphItem("Firestore", "Persistence layer used by the Scann app.", 0.98)
+    ];
+
+    const lookupInput = extractionInput(
+      "conv-lookup",
+      "What is Firestore?",
+      "Firestore",
+      0.98
+    );
+    lookupInput.extraction.entities = [
+      graphItem("Firestore", "A database product the user asked about.", 0.98)
+    ];
+
+    const graph = await buildContextGraph(
+      [durableInput, lookupInput],
+      { ...DEFAULT_SETTINGS, minimumCanonicalSources: 1 },
+      provider
+    );
+
+    const firestore = graph.nodes.find((node) => node.label === "Firestore");
+    expect(firestore).toBeDefined();
+    expect(graph.sourceClassesById["conv-lookup"]).toBe("transactional_lookup");
+    expect(
+      Object.values(graph.sourceLinksById["conv-lookup"]).flat().some((node) => node?.label === "Firestore")
+    ).toBe(true);
+  });
+
   it("calls summary synthesis for nodes with sufficient evidence", async () => {
     const synthesizedLabels: string[] = [];
     const synthProvider: AIProvider = {
@@ -997,6 +1055,96 @@ describe("context graph builder", () => {
     expect(graph.reviewQueueItems[0].status).toBe("pending");
   });
 
+  it("promotes repeated high-evidence self-model groups after review compaction", async () => {
+    const labels = [
+      "Concise copy preference",
+      "Prefers short useful answers",
+      "Brevity with dense responses"
+    ];
+    const inputs = labels.map((label, index) => {
+      const input = extractionInput(`conv-concise-${index}`, `Output style ${index}`, "placeholder", 0.4);
+      input.extraction.topics = [];
+      input.extraction.preferences = [
+        {
+          label,
+          summary: "The user repeatedly prefers concise, high-density communication.",
+          confidence: 0.88,
+          stability: "recurring",
+          inferenceLevel: "supported_inference",
+          appliesTo: ["communication", "writing"],
+          agentInstruction: "Keep responses concise but dense enough to use.",
+          evidence: [
+            {
+              quote: `concise useful answer ${index}`,
+              turnRole: "user",
+              confidence: 0.88
+            },
+            {
+              quote: `short but detailed response ${index}`,
+              turnRole: "user",
+              confidence: 0.87
+            }
+          ]
+        }
+      ];
+      return input;
+    });
+
+    const graph = await buildContextGraph(
+      inputs,
+      { ...DEFAULT_SETTINGS, semanticMergeThreshold: 1.1 },
+      provider
+    );
+    const preferenceNodes = graph.nodes.filter((node) => node.type === "preference");
+
+    expect(preferenceNodes).toHaveLength(1);
+    expect(preferenceNodes[0].label).toBe("Concise, high-density communication");
+    expect(graph.reviewQueueItems).toHaveLength(0);
+    expect(graph.stats.postCompactionPromotedReviewItems).toBe(1);
+  });
+
+  it("keeps repeated lookup-behavior review groups non-canonical unless approved", async () => {
+    const lookupSeed = reviewSeed("pending", "agent_instruction", "Product lookup response style");
+    lookupSeed.reviewPriority = "high";
+    lookupSeed.reviewCategory = "lookup_behavior";
+    lookupSeed.confidence = 0.9;
+    lookupSeed.stability = "recurring";
+    lookupSeed.inferenceLevel = "supported_inference";
+    lookupSeed.sourceIds = ["lookup-1", "lookup-2", "lookup-3"];
+    lookupSeed.groupedSourceCount = 3;
+    lookupSeed.groupedEvidenceCount = 6;
+    lookupSeed.evidence = lookupSeed.sourceIds.flatMap((sourceId, index) => [
+      {
+        sourceId,
+        sourceTitle: `Shopping lookup ${index}`,
+        sourcePath: `Context Graph/Sources/ChatGPT/${sourceId}.md`,
+        quote: `shopping lookup evidence ${index}`,
+        confidence: 0.9
+      },
+      {
+        sourceId,
+        sourceTitle: `Shopping lookup ${index}`,
+        sourcePath: `Context Graph/Sources/ChatGPT/${sourceId}.md`,
+        quote: `product comparison evidence ${index}`,
+        confidence: 0.88
+      }
+    ]);
+
+    const graph = await buildContextGraph(
+      [],
+      DEFAULT_SETTINGS,
+      provider,
+      {
+        nodeSeeds: [],
+        reviewSeeds: [lookupSeed]
+      }
+    );
+
+    expect(graph.nodes.filter((node) => node.type === "agent_instruction")).toHaveLength(0);
+    expect(graph.reviewQueueItems).toHaveLength(1);
+    expect(graph.reviewQueueItems[0].reviewCategory).toBe("lookup_behavior");
+  });
+
   it("keeps single-source agent instructions review-only even when explicit", async () => {
     const input = extractionInput("conv-agent-review", "Output style", "placeholder", 0.4);
     input.extraction.topics = [];
@@ -1174,7 +1322,7 @@ describe("context graph builder", () => {
     const graph = await buildContextGraph([input, secondInput], DEFAULT_SETTINGS, provider);
     const pattern = graph.nodes.find((node) => node.type === "pattern");
 
-    expect(pattern?.label).toBe("Concise high-density writing");
+    expect(pattern?.label).toBe("Concise, high-density communication");
     expect(graph.nodes.some((node) => node.type === "style_pattern")).toBe(false);
   });
 });

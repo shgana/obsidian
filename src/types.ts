@@ -73,6 +73,25 @@ export type SelfModelStability = "stable" | "recurring" | "situational" | "tempo
 export type SelfModelInferenceLevel = "explicit" | "supported_inference";
 export type ReviewStatus = "pending" | "approved" | "rejected";
 export type ReviewPriority = "high" | "medium" | "low";
+export type ReviewCategory =
+  | "communication_style"
+  | "technical_workflow"
+  | "product_strategy"
+  | "scann_logic"
+  | "ailingo_ux"
+  | "writing_resume_pitch"
+  | "visual_design"
+  | "lookup_behavior"
+  | "other";
+export type SourceClass =
+  | "durable_project"
+  | "durable_profile"
+  | "tool_workflow"
+  | "writing_workflow"
+  | "transactional_lookup"
+  | "shopping_product_lookup"
+  | "academic_problem"
+  | "other";
 
 export interface ConversationTurn {
   id: string;
@@ -177,6 +196,7 @@ export interface BuiltContextGraph {
   edges: GraphEdge[];
   reviewQueueItems: ReviewQueueItem[];
   sourcePathsById: Record<string, string>;
+  sourceClassesById: Record<string, SourceClass>;
   sourceLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   nodeLinksById: Record<string, Partial<Record<ContextNodeType, GraphNode[]>>>;
   warnings: string[];
@@ -199,6 +219,8 @@ export interface GraphBuildStats {
   sourceAnchorFallbacks: number;
   underlinkedSources: number;
   anchorCandidatesRejected: number;
+  sourceClassCounts: Record<SourceClass, number>;
+  transactionalSourceSuppressions: number;
   reviewQueueItems: number;
   reviewQueueGroups: number;
   reviewQueueHighPriority: number;
@@ -206,7 +228,11 @@ export interface GraphBuildStats {
   reviewQueueLowPriority: number;
   reviewQueueMergedVariants: number;
   reviewQueueSummarizedCandidates: number;
+  reviewQueueRenderedGroups: number;
+  reviewQueueSummarizedGroups: number;
+  reviewQueueCategoryCounts: Record<ReviewCategory, number>;
   promotedReviewItems: number;
+  postCompactionPromotedReviewItems: number;
   suppressedReviewItems: number;
   canonicalSelfModelNodes: number;
   inferredCanonicalNodes: number;
@@ -251,6 +277,7 @@ export interface ReviewQueueItem {
   agentInstruction?: string;
   status: ReviewStatus;
   reviewPriority?: ReviewPriority;
+  reviewCategory?: ReviewCategory;
   variantLabels?: string[];
   variantCount?: number;
   groupedSourceCount?: number;
@@ -438,6 +465,8 @@ export interface GraphBuildReport {
   sourceAnchorFallbackCount: number;
   underlinkedSourceCount: number;
   anchorCandidateRejectedCount: number;
+  sourceClassCounts: Record<SourceClass, number>;
+  transactionalSourceSuppressionCount: number;
   reviewQueueItemCount: number;
   reviewQueueGroupCount: number;
   reviewQueueHighPriorityCount: number;
@@ -445,7 +474,11 @@ export interface GraphBuildReport {
   reviewQueueLowPriorityCount: number;
   reviewQueueMergedVariantCount: number;
   reviewQueueSummarizedCandidateCount: number;
+  reviewQueueRenderedGroupCount: number;
+  reviewQueueSummarizedGroupCount: number;
+  reviewQueueCategoryCounts: Record<ReviewCategory, number>;
   promotedReviewItemCount: number;
+  postCompactionPromotedReviewItemCount: number;
   suppressedReviewItemCount: number;
   canonicalSelfModelNodeCount: number;
   inferredCanonicalNodeCount: number;

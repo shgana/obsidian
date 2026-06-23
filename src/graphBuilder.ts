@@ -13,10 +13,12 @@ import {
   type GraphEdge,
   type GraphNode,
   type NodeEvidence,
+  type ReviewCategory,
   type ReviewPriority,
   type ReviewQueueItem,
   type ReviewQueueSeed,
-  type ReviewStatus
+  type ReviewStatus,
+  type SourceClass
 } from "./types";
 import { cosineSimilarity, hashString, sanitizeFileName, slugify, uniqueBy } from "./text";
 
@@ -59,6 +61,27 @@ const SELF_MODEL_TYPES = new Set<ContextNodeType>([
 ]);
 const NOUN_HEAVY_TYPES = new Set<ContextNodeType>(["topic", "entity", "artifact"]);
 const REVIEW_QUEUE_MIN_CONFIDENCE = 0.65;
+const SOURCE_CLASSES: SourceClass[] = [
+  "durable_project",
+  "durable_profile",
+  "tool_workflow",
+  "writing_workflow",
+  "transactional_lookup",
+  "shopping_product_lookup",
+  "academic_problem",
+  "other"
+];
+const REVIEW_CATEGORIES: ReviewCategory[] = [
+  "communication_style",
+  "technical_workflow",
+  "product_strategy",
+  "scann_logic",
+  "ailingo_ux",
+  "writing_resume_pitch",
+  "visual_design",
+  "lookup_behavior",
+  "other"
+];
 
 interface Candidate {
   type: ContextNodeType;
@@ -66,6 +89,7 @@ interface Candidate {
   input: ConversationExtraction;
   sourcePath: string;
   sourceId: string;
+  sourceClass: SourceClass;
   embedding?: number[];
   projectClassification?: ProjectCandidateClassification;
 }
@@ -198,6 +222,7 @@ function reviewSeedToReviewQueueItem(seed: ReviewQueueSeed): ReviewQueueItem {
     agentInstruction: seed.agentInstruction,
     status: seed.status,
     reviewPriority: seed.reviewPriority,
+    reviewCategory: seed.reviewCategory,
     variantLabels: seed.variantLabels || [],
     variantCount: seed.variantCount,
     groupedSourceCount: seed.groupedSourceCount,
@@ -218,6 +243,7 @@ export async function buildContextGraph(
     edges: [],
     reviewQueueItems: [...reviewRegistry.retainedItems],
     sourcePathsById: {},
+    sourceClassesById: {},
     sourceLinksById: {},
     nodeLinksById: {},
     warnings: [],
@@ -247,11 +273,17 @@ export async function buildContextGraph(
   graph.stats.promotedReviewItems = reviewRegistry.approvedSeeds.length;
 
   const unmatchedCandidates: Candidate[] = [];
+  const suppressedLinkCandidates: Candidate[] = [];
   const sourceAnchorCandidatesBySource = new Map<string, Candidate[]>();
-  const transactionalSourceIds = new Set<string>();
+  const suppressedSourceIds = new Set<string>();
   const processCandidate = async (
     candidate: Candidate,
-    options: { allowUnmatched: boolean; includeAlias: boolean; includeSummary: boolean }
+    options: {
+      allowUnmatched: boolean;
+      includeAlias: boolean;
+      includeSummary: boolean;
+      countSourceSuppression?: boolean;
+    }
   ): Promise<void> => {
     if (isRejectedReviewCandidate(candidate, reviewRegistry)) {
       graph.stats.suppressedReviewItems += 1;
@@ -277,21 +309,30 @@ export async function buildContextGraph(
       return;
     }
 
+    if (options.countSourceSuppression) {
+      if (!SELF_MODEL_TYPES.has(candidate.type)) {
+        suppressedLinkCandidates.push(candidate);
+      }
+      graph.stats.transactionalSourceSuppressions += 1;
+    }
     graph.stats.sourceOnlyCandidates += 1;
     graph.stats.demotedCandidates += 1;
   };
 
   for (const input of inputs) {
     const sourcePath = buildSourcePath(input.conversation.title, input.conversation.sourceId, settings);
+    const sourceClass = classifySource(input);
     graph.sourcePathsById[input.conversation.sourceId] = sourcePath;
+    graph.sourceClassesById[input.conversation.sourceId] = sourceClass;
+    graph.stats.sourceClassCounts[sourceClass] += 1;
     graph.sourceLinksById[input.conversation.sourceId] = {};
-    const sourceAnchors = collectSourceAnchorCandidates(input, sourcePath);
+    const sourceAnchors = collectSourceAnchorCandidates(input, sourcePath, sourceClass);
     sourceAnchorCandidatesBySource.set(input.conversation.sourceId, sourceAnchors.candidates);
     graph.stats.anchorCandidatesRejected += sourceAnchors.rejected;
 
-    const conversationIsTransactional = isTransactionalConversation(input);
-    if (conversationIsTransactional) {
-      transactionalSourceIds.add(input.conversation.sourceId);
+    const sourceOnlyByDefault = isSourceOnlyByDefault(sourceClass);
+    if (sourceOnlyByDefault) {
+      suppressedSourceIds.add(input.conversation.sourceId);
     }
 
     for (const type of CONTEXT_NODE_TYPES) {
@@ -304,7 +345,8 @@ export async function buildContextGraph(
           item,
           input,
           sourcePath,
-          sourceId: input.conversation.sourceId
+          sourceId: input.conversation.sourceId,
+          sourceClass
         }));
 
       if (type === "project") {
@@ -345,8 +387,10 @@ export async function buildContextGraph(
       }
 
       for (const candidate of candidates) {
+        const selfModelCandidate = SELF_MODEL_TYPES.has(candidate.type);
         await processCandidate(candidate, {
-          allowUnmatched: !conversationIsTransactional,
+          allowUnmatched: !sourceOnlyByDefault || selfModelCandidate,
+          countSourceSuppression: sourceOnlyByDefault && !selfModelCandidate,
           includeAlias: true,
           includeSummary: true
         });
@@ -390,14 +434,25 @@ export async function buildContextGraph(
     }
   }
 
+  await linkSuppressedCandidatesToExistingNodes(
+    graph,
+    registry,
+    suppressedLinkCandidates,
+    settings,
+    provider
+  );
+
   await applySourceAnchorFallback(
     graph,
     registry,
     sourceAnchorCandidatesBySource,
-    transactionalSourceIds,
+    suppressedSourceIds,
     settings,
     provider
   );
+  graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
+  graph.reviewQueueItems = compactReviewQueueItems(graph.reviewQueueItems);
+  await promoteReviewGroupsAfterCompaction(graph, registry, settings, provider);
   graph.stats.sourceOnlyCandidates += capSourceLinks(graph, settings);
   addCoOccurrenceLinks(graph, settings);
   await addSemanticSimilarityLinks(graph, settings, provider);
@@ -408,27 +463,7 @@ export async function buildContextGraph(
   finalizeGraphStats(graph, registry);
   graph.nodes.sort((left, right) => left.path.localeCompare(right.path));
   graph.edges.sort((left, right) => left.id.localeCompare(right.id));
-  graph.reviewQueueItems = compactReviewQueueItems(graph.reviewQueueItems);
-  graph.stats.reviewQueueItems = graph.reviewQueueItems.length;
-  graph.stats.reviewQueueGroups = graph.reviewQueueItems.filter(
-    (item) => item.reviewPriority !== "low"
-  ).length;
-  graph.stats.reviewQueueHighPriority = graph.reviewQueueItems.filter(
-    (item) => item.reviewPriority === "high"
-  ).length;
-  graph.stats.reviewQueueMediumPriority = graph.reviewQueueItems.filter(
-    (item) => item.reviewPriority === "medium"
-  ).length;
-  graph.stats.reviewQueueLowPriority = graph.reviewQueueItems.filter(
-    (item) => item.reviewPriority === "low"
-  ).length;
-  graph.stats.reviewQueueMergedVariants = graph.reviewQueueItems.reduce(
-    (sum, item) => sum + Math.max(0, (item.variantCount || 1) - 1),
-    0
-  );
-  graph.stats.reviewQueueSummarizedCandidates = graph.reviewQueueItems
-    .filter((item) => item.reviewPriority === "low")
-    .reduce((sum, item) => sum + (item.variantCount || 1), 0);
+  finalizeReviewQueueStats(graph);
   graph.reviewQueueItems.sort((left, right) => {
     const statusDelta = reviewStatusRank(left.status) - reviewStatusRank(right.status);
     if (statusDelta !== 0) {
@@ -460,6 +495,10 @@ function createStats(): GraphBuildStats {
     sourceAnchorFallbacks: 0,
     underlinkedSources: 0,
     anchorCandidatesRejected: 0,
+    sourceClassCounts: Object.fromEntries(
+      SOURCE_CLASSES.map((sourceClass) => [sourceClass, 0])
+    ) as Record<SourceClass, number>,
+    transactionalSourceSuppressions: 0,
     reviewQueueItems: 0,
     reviewQueueGroups: 0,
     reviewQueueHighPriority: 0,
@@ -467,7 +506,13 @@ function createStats(): GraphBuildStats {
     reviewQueueLowPriority: 0,
     reviewQueueMergedVariants: 0,
     reviewQueueSummarizedCandidates: 0,
+    reviewQueueRenderedGroups: 0,
+    reviewQueueSummarizedGroups: 0,
+    reviewQueueCategoryCounts: Object.fromEntries(
+      REVIEW_CATEGORIES.map((category) => [category, 0])
+    ) as Record<ReviewCategory, number>,
     promotedReviewItems: 0,
+    postCompactionPromotedReviewItems: 0,
     suppressedReviewItems: 0,
     canonicalSelfModelNodes: 0,
     inferredCanonicalNodes: 0,
@@ -1090,6 +1135,14 @@ function createReviewQueueItem(
       sourceCount: sourceIds.length,
       status: "pending"
     }),
+    reviewCategory: reviewCategoryForItem({
+      type: cluster.type,
+      label,
+      summary: representative.item.summary,
+      agentInstruction: representative.item.agentInstruction,
+      appliesTo: representative.item.appliesTo,
+      sourceTitles: uniqueStrings(cluster.candidates.map((candidate) => candidate.input.conversation.title))
+    }),
     variantLabels,
     variantCount: cluster.candidates.length,
     groupedSourceCount: sourceIds.length,
@@ -1124,18 +1177,154 @@ function compactReviewQueueItems(items: ReviewQueueItem[]): ReviewQueueItem[] {
       inferenceLevel: item.inferenceLevel,
       sourceCount: item.sourceIds.length,
       status: item.status
+    }),
+    reviewCategory: item.reviewCategory || reviewCategoryForItem({
+      type: item.type,
+      label: item.label,
+      summary: item.summary,
+      agentInstruction: item.agentInstruction,
+      appliesTo: item.appliesTo,
+      sourceTitles: item.evidence.map((entry) => entry.sourceTitle)
     })
   }));
 }
 
+async function promoteReviewGroupsAfterCompaction(
+  graph: BuiltContextGraph,
+  registry: MatchRegistry,
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  const retained: ReviewQueueItem[] = [];
+
+  for (const item of graph.reviewQueueItems) {
+    if (!shouldPromoteCompactedReviewItem(item)) {
+      retained.push(item);
+      continue;
+    }
+
+    const existingNode = await findNodeMatchForLabel(
+      item.type,
+      item.label,
+      item.summary,
+      item.aliases,
+      registry,
+      graph,
+      settings,
+      provider
+    );
+
+    const node = existingNode || createNodeFromReviewItem(item, settings.outputFolder);
+    if (!existingNode) {
+      registerNodeForMatching(registry, node, false);
+    }
+
+    activateNode(graph, registry, node);
+    mergeReviewItemIntoNode(node, item);
+    indexNode(node, registry.nodeIndex);
+
+    for (const sourceId of item.sourceIds) {
+      graph.sourceLinksById[sourceId] = graph.sourceLinksById[sourceId] || {};
+      addSourceLink(graph, sourceId, item.type, node);
+    }
+
+    graph.stats.postCompactionPromotedReviewItems += 1;
+    graph.stats.newlyPromotedNodes += existingNode ? 0 : 1;
+  }
+
+  graph.reviewQueueItems = retained;
+}
+
+function shouldPromoteCompactedReviewItem(item: ReviewQueueItem): boolean {
+  if (!SELF_MODEL_TYPES.has(item.type)) {
+    return false;
+  }
+
+  if (item.status === "rejected") {
+    return false;
+  }
+
+  if (item.status === "approved") {
+    return true;
+  }
+
+  if (item.reviewCategory === "lookup_behavior") {
+    return false;
+  }
+
+  const durableStability = item.stability === "stable" || item.stability === "recurring";
+  const groupedEvidence = item.groupedEvidenceCount || item.evidence.length;
+  const sourceCount = item.groupedSourceCount || item.sourceIds.length;
+  const explicitEnough = item.inferenceLevel === "explicit" && sourceCount >= 2;
+  const inferredEnough = item.inferenceLevel === "supported_inference" && sourceCount >= 3;
+
+  if (item.type === "agent_instruction" && sourceCount < 2) {
+    return false;
+  }
+
+  return item.reviewPriority === "high" &&
+    durableStability &&
+    item.confidence >= 0.85 &&
+    groupedEvidence >= 4 &&
+    (explicitEnough || inferredEnough);
+}
+
+function createNodeFromReviewItem(
+  item: ReviewQueueItem,
+  outputFolder: string
+): GraphNode {
+  return {
+    id: `${item.type}_${item.slug || slugify(item.label)}`,
+    type: item.type,
+    label: item.label,
+    slug: item.slug || slugify(item.label),
+    aliases: uniqueStrings([...(item.aliases || []), ...(item.variantLabels || [])]).filter(
+      (alias) => slugify(alias) !== (item.slug || slugify(item.label))
+    ),
+    path: buildNodePath(item.type, item.label, outputFolder),
+    summary: item.summary,
+    confidence: item.confidence,
+    evidence: [...item.evidence],
+    sourceIds: uniqueStrings(item.sourceIds),
+    lastSeen: item.lastSeen,
+    stability: item.stability,
+    inferenceLevel: item.inferenceLevel,
+    appliesTo: item.appliesTo,
+    agentInstruction: item.agentInstruction
+  };
+}
+
+function mergeReviewItemIntoNode(node: GraphNode, item: ReviewQueueItem): void {
+  node.confidence = Math.max(node.confidence, item.confidence);
+  node.summary = mergeSummary(node.summary, item.summary);
+  node.lastSeen = maxStringDate(node.lastSeen, item.lastSeen);
+  node.sourceIds = uniqueStrings([...node.sourceIds, ...item.sourceIds]);
+  node.evidence = uniqueBy(
+    [...node.evidence, ...item.evidence],
+    (entry) => `${entry.sourceId}:${entry.quote}`
+  )
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, 30);
+  for (const alias of [item.label, ...item.aliases, ...(item.variantLabels || [])]) {
+    addAlias(node, alias);
+  }
+  mergeSelfModelMetadata(node, item);
+}
+
 function normalizeReviewQueueItem(item: ReviewQueueItem): ReviewQueueItem {
+  const label = canonicalLabelForType(item.type, item.label, item.summary);
+  const slug = slugify(label);
   const variantLabels = uniqueStrings([
+    item.label,
     ...(item.variantLabels || []),
     ...item.aliases
-  ]).filter((label) => slugify(label) !== item.slug);
+  ]).filter((variantLabel) => slugify(variantLabel) !== slug);
 
   return {
     ...item,
+    id: `review_${item.type}_${slug}`,
+    label,
+    slug,
     reviewPriority: item.reviewPriority || reviewPriorityForItem({
       type: item.type,
       confidence: item.confidence,
@@ -1143,6 +1332,14 @@ function normalizeReviewQueueItem(item: ReviewQueueItem): ReviewQueueItem {
       inferenceLevel: item.inferenceLevel,
       sourceCount: item.sourceIds.length,
       status: item.status
+    }),
+    reviewCategory: item.reviewCategory || reviewCategoryForItem({
+      type: item.type,
+      label,
+      summary: item.summary,
+      agentInstruction: item.agentInstruction,
+      appliesTo: item.appliesTo,
+      sourceTitles: item.evidence.map((entry) => entry.sourceTitle)
     }),
     variantLabels,
     variantCount: Math.max(item.variantCount || 1, variantLabels.length + 1),
@@ -1174,6 +1371,7 @@ function mergeReviewItemInto(target: ReviewQueueItem, incoming: ReviewQueueItem)
   }
   target.stability = strongestStabilityValue(target.stability, incoming.stability);
   target.inferenceLevel = strongestInferenceValue(target.inferenceLevel, incoming.inferenceLevel);
+  target.reviewCategory = strongestReviewCategory(target, incoming);
   target.variantLabels = uniqueStrings([
     previousLabel,
     target.label,
@@ -1190,6 +1388,16 @@ function mergeReviewItemInto(target: ReviewQueueItem, incoming: ReviewQueueItem)
   );
   target.groupedSourceCount = target.sourceIds.length;
   target.groupedEvidenceCount = (target.groupedEvidenceCount || 0) + (incoming.groupedEvidenceCount || incoming.evidence.length);
+}
+
+function strongestReviewCategory(left: ReviewQueueItem, right: ReviewQueueItem): ReviewCategory {
+  if (left.reviewCategory && left.reviewCategory !== "other") {
+    return left.reviewCategory;
+  }
+  if (right.reviewCategory && right.reviewCategory !== "other") {
+    return right.reviewCategory;
+  }
+  return left.reviewCategory || right.reviewCategory || "other";
 }
 
 function shouldMergeReviewItems(left: ReviewQueueItem, right: ReviewQueueItem): boolean {
@@ -1269,6 +1477,57 @@ function reviewPriorityForItem(args: {
   return "medium";
 }
 
+function reviewCategoryForItem(args: {
+  type: ContextNodeType;
+  label: string;
+  summary: string;
+  agentInstruction?: string;
+  appliesTo?: string[];
+  sourceTitles?: string[];
+}): ReviewCategory {
+  const text = [
+    args.label,
+    args.summary,
+    args.agentInstruction || "",
+    ...(args.appliesTo || []),
+    ...(args.sourceTitles || [])
+  ].join(" ");
+
+  if (/\b(scann|scanis|bodyscanner|body scanner|physique|posture|scan|fitness|workout|benchmark|benchmarking)\b/i.test(text)) {
+    return "scann_logic";
+  }
+
+  if (/\b(ailingo|ai-lingo|duolingo|lesson|onboarding|learning app|gamified|gleam)\b/i.test(text)) {
+    return "ailingo_ux";
+  }
+
+  if (/\b(concise|terse|brief|tone|wording|communication|answer|response|bullet|bulleted)\b/i.test(text)) {
+    return "communication_style";
+  }
+
+  if (/\b(resume|linkedin|pitch|deck|slide|slides|investor|fundraising|email|message|caption|copy)\b/i.test(text)) {
+    return "writing_resume_pitch";
+  }
+
+  if (/\b(figma|visual|design|ui|ux|layout|screen|mockup|aesthetic|symmetry)\b/i.test(text)) {
+    return "visual_design";
+  }
+
+  if (/\b(cursor|codex|claude|github|git|xcode|swift|typescript|react|implementation|code|technical|spec|prompt|json|schema|tool|workflow)\b/i.test(text)) {
+    return "technical_workflow";
+  }
+
+  if (/\b(product|strategy|positioning|wedge|mvp|founder|customer|market|pricing|growth|distribution)\b/i.test(text)) {
+    return "product_strategy";
+  }
+
+  if (/\b(search|lookup|shopping|product|comparison|overview|recommendation|review|query|walmart|amazon|nike|harry'?s)\b/i.test(text)) {
+    return "lookup_behavior";
+  }
+
+  return "other";
+}
+
 function reviewPriorityRank(priority?: ReviewPriority): number {
   return {
     high: 0,
@@ -1287,7 +1546,8 @@ function reviewStatusRank(status: ReviewStatus): number {
 
 function collectSourceAnchorCandidates(
   input: ConversationExtraction,
-  sourcePath: string
+  sourcePath: string,
+  sourceClass: SourceClass
 ): { candidates: Candidate[]; rejected: number } {
   const candidates: Candidate[] = [];
   let rejected = 0;
@@ -1304,7 +1564,8 @@ function collectSourceAnchorCandidates(
         item,
         input,
         sourcePath,
-        sourceId: input.conversation.sourceId
+        sourceId: input.conversation.sourceId,
+        sourceClass
       };
 
       if (isEligibleSourceAnchorCandidate(candidate)) {
@@ -1328,11 +1589,36 @@ function isEligibleSourceAnchorCandidate(candidate: Candidate): boolean {
     isNamedSourceAnchorLabel(candidate.type, candidate.item.label);
 }
 
+async function linkSuppressedCandidatesToExistingNodes(
+  graph: BuiltContextGraph,
+  registry: MatchRegistry,
+  candidates: Candidate[],
+  settings: PersonalContextGraphSettings,
+  provider: AIProvider
+): Promise<void> {
+  for (const candidate of candidates) {
+    if (countSourceLinks(graph.sourceLinksById[candidate.sourceId] || {}) >= settings.maxSourceLinksPerType) {
+      continue;
+    }
+
+    const existingNode = await findNodeMatch(candidate, registry, graph, settings, provider);
+    if (!existingNode) {
+      continue;
+    }
+
+    activateNode(graph, registry, existingNode);
+    mergeCandidateIntoNode(existingNode, candidate);
+    indexNode(existingNode, registry.nodeIndex);
+    addSourceLink(graph, candidate.sourceId, candidate.type, existingNode);
+    graph.stats.mergedCandidates += 1;
+  }
+}
+
 async function applySourceAnchorFallback(
   graph: BuiltContextGraph,
   registry: MatchRegistry,
   sourceAnchorCandidatesBySource: Map<string, Candidate[]>,
-  transactionalSourceIds: Set<string>,
+  suppressedSourceIds: Set<string>,
   settings: PersonalContextGraphSettings,
   provider: AIProvider
 ): Promise<void> {
@@ -1358,7 +1644,8 @@ async function applySourceAnchorFallback(
       continue;
     }
 
-    if (transactionalSourceIds.has(sourceId)) {
+    if (suppressedSourceIds.has(sourceId)) {
+      graph.stats.transactionalSourceSuppressions += 1;
       graph.stats.sourceOnlyCandidates += 1;
       graph.stats.demotedCandidates += 1;
       continue;
@@ -1488,7 +1775,46 @@ function canonicalLabelForType(type: ContextNodeType, label: string, summary: st
     return "AiLingo / AI Learning App";
   }
 
+  const selfModelFamilyLabel = canonicalSelfModelFamilyLabel(type, label, summary);
+  if (selfModelFamilyLabel) {
+    return selfModelFamilyLabel;
+  }
+
   return label;
+}
+
+function canonicalSelfModelFamilyLabel(
+  type: ContextNodeType,
+  label: string,
+  summary: string
+): string | undefined {
+  if (!SELF_MODEL_TYPES.has(type)) {
+    return undefined;
+  }
+
+  const text = `${label} ${summary}`;
+  if (
+    /\b(concise|terse|brief|brevity|short|dense|high-density)\b/i.test(text) &&
+    /\b(copy|output|wording|answer|answers|response|responses|writing|communication|reply|replies|investor|slide|deck)\b/i.test(text)
+  ) {
+    return "Concise, high-density communication";
+  }
+
+  if (
+    /\b(bullet|bullets|bulleted|list|lists|structured)\b/i.test(text) &&
+    /\b(output|format|response|summary|summaries|writing|copy|implementation|guidance)\b/i.test(text)
+  ) {
+    return "Structured bullet-based output";
+  }
+
+  if (
+    /\b(technical|implementation|code|coded|spec|specs|engineering|developer|cursor|codex)\b/i.test(text) &&
+    /\b(detail|detailed|specific|grounded|implementation|plan|guidance|prompt|prompts)\b/i.test(text)
+  ) {
+    return "Technically detailed implementation guidance";
+  }
+
+  return undefined;
 }
 
 function mergeCandidateIntoNode(
@@ -1962,6 +2288,52 @@ function finalizeGraphStats(graph: BuiltContextGraph, registry: MatchRegistry): 
       : Math.round((graph.stats.nounNodeCount / graph.stats.selfModelNodeCount) * 100) / 100;
 }
 
+function finalizeReviewQueueStats(graph: BuiltContextGraph): void {
+  graph.stats.reviewQueueItems = graph.reviewQueueItems.length;
+  graph.stats.reviewQueueHighPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "high"
+  ).length;
+  graph.stats.reviewQueueMediumPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "medium"
+  ).length;
+  graph.stats.reviewQueueLowPriority = graph.reviewQueueItems.filter(
+    (item) => item.reviewPriority === "low"
+  ).length;
+  graph.stats.reviewQueueMergedVariants = graph.reviewQueueItems.reduce(
+    (sum, item) => sum + Math.max(0, (item.variantCount || 1) - 1),
+    0
+  );
+  graph.stats.reviewQueueSummarizedCandidates = graph.reviewQueueItems
+    .filter((item) => item.reviewPriority === "low")
+    .reduce((sum, item) => sum + (item.variantCount || 1), 0);
+  graph.stats.reviewQueueCategoryCounts = Object.fromEntries(
+    REVIEW_CATEGORIES.map((category) => [
+      category,
+      graph.reviewQueueItems.filter((item) => (item.reviewCategory || "other") === category).length
+    ])
+  ) as Record<ReviewCategory, number>;
+
+  let renderedGroups = 0;
+  let summarizedGroups = 0;
+  for (const category of REVIEW_CATEGORIES) {
+    const items = graph.reviewQueueItems.filter((item) => (item.reviewCategory || "other") === category);
+    const highItems = items.filter((item) => item.reviewPriority === "high");
+    const mediumItems = items.filter((item) => item.reviewPriority === "medium");
+    const lowItems = items.filter((item) => item.reviewPriority === "low");
+    const renderedHigh = Math.min(5, highItems.length);
+    const renderedMedium = Math.min(3, mediumItems.length);
+    renderedGroups += renderedHigh + renderedMedium;
+    summarizedGroups +=
+      Math.max(0, highItems.length - renderedHigh) +
+      Math.max(0, mediumItems.length - renderedMedium) +
+      lowItems.length;
+  }
+
+  graph.stats.reviewQueueGroups = renderedGroups;
+  graph.stats.reviewQueueRenderedGroups = renderedGroups;
+  graph.stats.reviewQueueSummarizedGroups = summarizedGroups;
+}
+
 function countIsolatedCanonicalNodes(graph: BuiltContextGraph): number {
   const degrees = computeCanonicalDegrees(graph);
   return graph.nodes.filter((node) => (degrees.get(node.id) || 0) === 0).length;
@@ -2260,6 +2632,103 @@ function isTransactionalConversation(input: ConversationExtraction): boolean {
   }
 
   return false;
+}
+
+function classifySource(input: ConversationExtraction): SourceClass {
+  const title = input.conversation.title.trim();
+  const text = sourceClassificationText(input);
+  const titleAndSummary = `${title} ${input.extraction.summary}`;
+  const domain = projectDomainKey(titleAndSummary);
+
+  if (
+    (domain && !isNonProjectDomain(domain)) ||
+    input.extraction.projects.some((item) =>
+      classifyProjectText(item.label, `${item.summary} ${text}`).kind === "durable_project"
+    )
+  ) {
+    return "durable_project";
+  }
+
+  if (isShoppingProductLookup(text)) {
+    return "shopping_product_lookup";
+  }
+
+  if (domain === "school-assignment" || isAcademicProblem(text)) {
+    return "academic_problem";
+  }
+
+  if (isProfileSource(text)) {
+    return "durable_profile";
+  }
+
+  if (isToolWorkflowSource(text)) {
+    return "tool_workflow";
+  }
+
+  if (isWritingWorkflowSource(text)) {
+    return "writing_workflow";
+  }
+
+  if (isTransactionalConversation(input)) {
+    return "transactional_lookup";
+  }
+
+  return "other";
+}
+
+function isSourceOnlyByDefault(sourceClass: SourceClass): boolean {
+  return sourceClass === "transactional_lookup" ||
+    sourceClass === "shopping_product_lookup" ||
+    sourceClass === "academic_problem";
+}
+
+function sourceClassificationText(input: ConversationExtraction): string {
+  const extractedText = CONTEXT_NODE_TYPES.flatMap((type) => {
+    const items = (input.extraction[ITEMS_BY_TYPE[type]] || []) as ExtractedContextItem[];
+    return items.flatMap((item) => [
+      item.label,
+      item.summary,
+      ...item.evidence.map((entry) => entry.quote)
+    ]);
+  }).join(" ");
+
+  return [
+    input.conversation.title,
+    input.extraction.summary,
+    extractedText
+  ].join(" ");
+}
+
+function isShoppingProductLookup(text: string): boolean {
+  const hasRetailOrProductSignal =
+    /\b(product|products|shopping|shop|buy|walmart|amazon|target|nike|lulu|lululemon|harry'?s|razor|razors|shaving|costume)\b/i.test(text);
+  const hasLookupIntent =
+    /\b(price|prices|option|options|shopping|shop|buy|walmart|amazon|target|review|overview|recommendation|compare|comparison)\b/i.test(text);
+  return hasRetailOrProductSignal && hasLookupIntent;
+}
+
+function isAcademicProblem(text: string): boolean {
+  if (/\b(assignment|homework|class|course|quiz|exam|worksheet)\b/i.test(text)) {
+    return !/\b(product|project|startup|plugin|app|scann|scanis|ailingo)\b/i.test(text);
+  }
+
+  return /\b(problem|question|calculation|calculate|solve)\b/i.test(text) &&
+    /\b(math|physics|chemistry|school|assignment|homework|answer|solution|top five)\b/i.test(text) &&
+    !/\b(product|project|startup|plugin|app|scann|scanis|ailingo)\b/i.test(text);
+}
+
+function isProfileSource(text: string): boolean {
+  return /\b(resume|linkedin|profile|bio|portfolio|personal website|about me|experience|education)\b/i.test(text);
+}
+
+function isToolWorkflowSource(text: string): boolean {
+  return /\b(cursor|codex|claude code|github|git|xcode|figma|obsidian|plugin|mcp|vercel|firebase|firestore|node\.?js|typescript|swift|react)\b/i.test(text) &&
+    /\b(build|debug|fix|implement|integration|workflow|setup|configure|code|repo|repository|tool)\b/i.test(text);
+}
+
+function isWritingWorkflowSource(text: string): boolean {
+  return /\b(rewrite|copy|caption|script|deck|slide|pitch|email|message|paragraph|wording|tone|resume|linkedin)\b/i.test(text) &&
+    /\b(write|rewrite|draft|revise|edit|polish|shorten|summarize|communicate|copy)\b/i.test(text);
 }
 
 function normalizedFilenameLabelSlug(label: string): string {

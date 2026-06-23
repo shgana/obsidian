@@ -300,14 +300,36 @@ export function renderReport(container: HTMLElement, report: GraphBuildReport): 
     text: `Rejected anchor candidates: ${report.anchorCandidateRejectedCount ?? 0}`
   });
   list.createEl("li", {
+    text: `Transactional source suppressions: ${report.transactionalSourceSuppressionCount ?? 0}`
+  });
+  if (report.sourceClassCounts) {
+    list.createEl("li", {
+      text: `Source classes: ${Object.entries(report.sourceClassCounts)
+        .filter(([, count]) => count > 0)
+        .map(([sourceClass, count]) => `${sourceClass} ${count}`)
+        .join(", ") || "none"}`
+    });
+  }
+  list.createEl("li", {
     text: `Review queue items: ${report.reviewQueueItemCount ?? 0}`
   });
   list.createEl("li", {
-    text: `Review groups rendered: ${report.reviewQueueGroupCount ?? 0}`
+    text: `Review groups rendered: ${report.reviewQueueRenderedGroupCount ?? report.reviewQueueGroupCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Review groups summarized: ${report.reviewQueueSummarizedGroupCount ?? 0}`
   });
   list.createEl("li", {
     text: `Review priority groups: high ${report.reviewQueueHighPriorityCount ?? 0}, medium ${report.reviewQueueMediumPriorityCount ?? 0}, low ${report.reviewQueueLowPriorityCount ?? 0}`
   });
+  if (report.reviewQueueCategoryCounts) {
+    list.createEl("li", {
+      text: `Review categories: ${Object.entries(report.reviewQueueCategoryCounts)
+        .filter(([, count]) => count > 0)
+        .map(([category, count]) => `${category} ${count}`)
+        .join(", ") || "none"}`
+    });
+  }
   list.createEl("li", {
     text: `Review variants merged: ${report.reviewQueueMergedVariantCount ?? 0}`
   });
@@ -316,6 +338,9 @@ export function renderReport(container: HTMLElement, report: GraphBuildReport): 
   });
   list.createEl("li", {
     text: `Approved review items promoted: ${report.promotedReviewItemCount ?? 0}`
+  });
+  list.createEl("li", {
+    text: `Review groups auto-promoted after compaction: ${report.postCompactionPromotedReviewItemCount ?? 0}`
   });
   list.createEl("li", {
     text: `Rejected review items suppressed: ${report.suppressedReviewItemCount ?? 0}`

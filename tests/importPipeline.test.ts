@@ -262,12 +262,36 @@ describe("import pipeline", () => {
 
     expect(reviewDrafts).toHaveLength(1);
     expect(inbox?.content).toContain('pcg_type: "review_queue"');
+    expect(inbox?.content).toContain("## AiLingo UX");
     expect(inbox?.content).toContain("### Review: Reference-driven UX design");
     expect(inbox?.content).toContain("- **Status**: `pending`");
     expect(inbox?.content).toContain("- **Priority**: `medium`");
+    expect(inbox?.content).toContain("- **Category**: `ailingo_ux`");
     expect(inbox?.content).not.toContain("[[");
     expect(artifacts.report.reviewQueueItemCount).toBe(1);
     expect(artifacts.report.reviewQueueGroupCount).toBe(1);
+  });
+
+  it("renders review queue by category with high and medium caps", async () => {
+    const artifacts = await runImport(
+      [conversation("conv-capped-review", "Review cap test")],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph",
+        semanticMergeThreshold: 1.1
+      },
+      cappedReviewQueueProvider
+    );
+    const inbox = artifacts.drafts.find((draft) => draft.path === "Context Graph/Review Queue.md");
+
+    expect(inbox?.content).toContain("## Communication Style");
+    expect((inbox?.content.match(/^### Review:/gm) || [])).toHaveLength(8);
+    expect(inbox?.content).toContain("### Overflow Summary");
+    expect(inbox?.content).toContain("1 high, 1 medium, 0 low");
+    expect(artifacts.report.reviewQueueRenderedGroupCount).toBe(8);
+    expect(artifacts.report.reviewQueueSummarizedGroupCount).toBe(2);
   });
 
   it("summarizes low-priority review candidates instead of rendering review chores", async () => {
@@ -275,7 +299,8 @@ describe("import pipeline", () => {
       ...DEFAULT_SETTINGS,
       openAiApiKey: "test",
       costCapUsd: 10,
-      outputFolder: "Context Graph"
+      outputFolder: "Context Graph",
+      semanticMergeThreshold: 1.1
     };
 
     const artifacts = await runImport(
@@ -285,10 +310,11 @@ describe("import pipeline", () => {
     );
     const inbox = artifacts.drafts.find((draft) => draft.path === "Context Graph/Review Queue.md");
 
-    expect(inbox?.content).toContain("## Low Priority Summary");
+    expect(inbox?.content).toContain("### Overflow Summary");
     expect(inbox?.content).not.toContain("### Review: Product lookup response style");
     expect(artifacts.report.reviewQueueItemCount).toBe(1);
     expect(artifacts.report.reviewQueueGroupCount).toBe(0);
+    expect(artifacts.report.reviewQueueSummarizedGroupCount).toBe(1);
     expect(artifacts.report.reviewQueueSummarizedCandidateCount).toBe(1);
   });
 
@@ -335,6 +361,25 @@ describe("import pipeline", () => {
     expect(
       artifacts.drafts.some((draft) => draft.path === "Context Graph/Entities/The Residency.md")
     ).toBe(false);
+  });
+
+  it("sanitizes ChatGPT product widgets and raw bracket links in source notes", async () => {
+    const productWidget = `[[\\"turn0product0\\",{\\"product_entity\\":\\"turn0product0\\",\\"title\\":\\"Harry's Razor\\"}]]`;
+    const artifacts = await runImport(
+      [conversation("conv-product-widget", "Harry's shaving overview", productWidget)],
+      {
+        ...DEFAULT_SETTINGS,
+        openAiApiKey: "test",
+        costCapUsd: 10,
+        outputFolder: "Context Graph"
+      },
+      productWidgetProvider
+    );
+    const sourceDraft = artifacts.drafts.find((draft) => draft.path.includes("/Sources/ChatGPT/"));
+
+    expect(sourceDraft?.content).not.toContain("turn0product");
+    expect(sourceDraft?.content).not.toContain("product_entity");
+    expect(sourceDraft?.content).not.toContain('[[\\"turn0product');
   });
 
   it("enforces cost caps before provider extraction", async () => {
@@ -566,6 +611,90 @@ const lowPriorityReviewProvider: AIProvider = {
           ]
         }
       ]
+    };
+  }
+};
+
+const cappedReviewQueueProvider: AIProvider = {
+  ...reviewQueueProvider,
+  async extractSelfModel(): Promise<Partial<ExtractedContext>> {
+    const highLabels = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
+    const mediumLabels = ["Gable", "Harbor", "Ivory", "Juniper"];
+    const highInstructions = Array.from({ length: 6 }, (_, index) => ({
+      label: highLabels[index],
+      summary: `The user has communication style preference ${index}.`,
+      confidence: 0.93,
+      stability: "stable" as const,
+      inferenceLevel: "explicit" as const,
+      appliesTo: ["communication"],
+      agentInstruction: `Use communication style ${index}.`,
+      evidence: [
+        {
+          quote: `Please use tone ${index}.`,
+          turnRole: "user" as const,
+          confidence: 0.93
+        }
+      ]
+    }));
+    const mediumPatterns = Array.from({ length: 4 }, (_, index) => ({
+      label: mediumLabels[index],
+      summary: `The user may prefer communication rhythm ${index}.`,
+      confidence: 0.82,
+      stability: "stable" as const,
+      inferenceLevel: "supported_inference" as const,
+      appliesTo: ["communication"],
+      agentInstruction: `Reflect communication rhythm ${index}.`,
+      evidence: [
+        {
+          quote: `Communication rhythm ${index}.`,
+          turnRole: "user" as const,
+          confidence: 0.82
+        }
+      ]
+    }));
+
+    return {
+      summary: "The user has multiple uncertain communication-style signals.",
+      confidence: 0.88,
+      agentInstructions: highInstructions,
+      patterns: mediumPatterns
+    };
+  }
+};
+
+const productWidgetProvider: AIProvider = {
+  ...mockProvider,
+  async extractContext(conversation): Promise<ExtractedContext> {
+    return {
+      sourceId: conversation.sourceId,
+      conversationTitle: conversation.title,
+      summary: `The user looked at [[\\"turn0product0\\",{\\"product_entity\\":\\"turn0product0\\",\\"title\\":\\"Harry's Razor\\"}]].`,
+      confidence: 0.8,
+      topics: [],
+      entities: [
+        {
+          label: "Harry's Razor",
+          summary: 'A product from [[\\"turn0product0\\",{\\"product_entity\\":\\"turn0product0\\"}]].',
+          confidence: 0.81,
+          evidence: [
+            {
+              quote: '[[\\"turn0product0\\",{\\"product_entity\\":\\"turn0product0\\"}]]',
+              turnRole: "user",
+              confidence: 0.81
+            }
+          ]
+        }
+      ],
+      projects: [],
+      patterns: [],
+      principles: [],
+      agentInstructions: [],
+      preferences: [],
+      decisions: [],
+      tasks: [],
+      artifacts: [],
+      stylePatterns: [],
+      extractedAt: "2026-06-23T00:00:00.000Z"
     };
   }
 };
