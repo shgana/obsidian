@@ -21,10 +21,14 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Personal Context Graph" });
 
+    let apiKeyInput: HTMLInputElement | undefined;
+    let apiKeyVisible = false;
+
     new Setting(containerEl)
       .setName("OpenAI API key")
       .setDesc("Used only after you explicitly confirm an import. Not saved unless you enable key persistence below.")
       .addText((text) => {
+        apiKeyInput = text.inputEl;
         text.inputEl.type = "password";
         text
           .setPlaceholder("sk-...")
@@ -32,6 +36,20 @@ export class PersonalContextGraphSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.host.settings.openAiApiKey = value.trim();
             await this.host.saveSettings();
+          });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon("eye")
+          .setTooltip("Show API key")
+          .onClick(() => {
+            apiKeyVisible = !apiKeyVisible;
+            if (apiKeyInput) {
+              apiKeyInput.type = apiKeyVisible ? "text" : "password";
+            }
+            button
+              .setIcon(apiKeyVisible ? "eye-off" : "eye")
+              .setTooltip(apiKeyVisible ? "Hide API key" : "Show API key");
           });
       });
 
